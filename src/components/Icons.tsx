@@ -72,6 +72,12 @@ export const IconCloudOff = (p: P) => (
     <path d="m2 2 20 20M5.8 5.8A7 7 0 0 0 7 19h10a5 5 0 0 0 2.8-.9M12 5a7 7 0 0 1 6.7 5H19a5 5 0 0 1 3 9" />
   </svg>
 );
+export const IconPiggy = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M19 5c-1.5 0-2.8 1.4-3 2-3.5-1.5-11-.3-11 5 0 1.8 0 3 2 4.5V20h4v-2h3v2h4v-4c1-.5 1.7-1 2-2h2v-4h-2c0-1-.5-1.5-1-2V5z" />
+    <path d="M2 9v1c0 1.1.9 2 2 2h1M16 11h.01" />
+  </svg>
+);
 export const IconCalendar = (p: P) => (
   <svg {...base({ width: 20, height: 20, ...p })}>
     <rect x="3" y="4" width="18" height="18" rx="2" />

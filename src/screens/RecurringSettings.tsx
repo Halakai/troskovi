@@ -10,30 +10,27 @@ import { IconPlus, IconRight } from '../components/Icons';
 
 export function RecurringSettings() {
   const data = useData();
-  const { category, personName } = useLookups();
+  const { category, account, personName } = useLookups();
   const [editing, setEditing] = useState<Recurring | 'new' | null>(null);
 
   const sorted = [...data.recurring].sort((a, b) => a.day_of_month - b.day_of_month);
-  const incomes = sorted.filter((r) => r.kind === 'income');
-  const expenses = sorted.filter((r) => r.kind === 'expense');
+  const ofKind = (k: Kind) => sorted.filter((r) => r.kind === k);
   const total = (list: Recurring[]) => list.filter((r) => r.active).reduce((s, r) => s + r.amount_cents, 0);
 
   const row = (r: Recurring) => (
     <button key={r.id} className={`cat-row ${r.active ? '' : 'inactive'}`} onClick={() => setEditing(r)}>
-      {r.kind === 'income' ? (
-        <span className="cat-icon" style={{ background: '#22c55e26', width: 36, height: 36, fontSize: 18 }}>
-          💰
-        </span>
-      ) : (
-        <CatIcon category={category(r.category_id)} size={36} />
-      )}
+      <CatIcon
+        category={r.kind === 'saving' ? account(r.savings_account_id) : category(r.category_id, r.kind === 'income' ? 'income' : 'expense')}
+        size={36}
+      />
       <span className="grow">
         <span className="cat-row-top">
           <span className="cat-row-name">{r.name}</span>
-          <b className={r.kind === 'income' ? 'pos' : ''}>{formatMoney(r.amount_cents)}</b>
+          <b className={r.kind === 'income' ? 'pos' : r.kind === 'saving' ? 'save' : ''}>{formatMoney(r.amount_cents)}</b>
         </span>
         <span className="small dim block">
           every {ordinal(r.day_of_month)} · {personName(r.person_id)}
+          {r.kind === 'saving' && ` · into ${account(r.savings_account_id)?.name ?? 'savings'}`}
           {!r.active && ' · paused'}
           {r.end_month && ` · until ${formatMonth(r.end_month.slice(0, 7))}`}
         </span>
@@ -41,6 +38,23 @@ export function RecurringSettings() {
       <IconRight className="dim" />
     </button>
   );
+
+  const section = (k: Kind, title: string, sign: string, tone: string) => {
+    const list = ofKind(k);
+    if (!list.length) return null;
+    return (
+      <section className="card">
+        <div className="card-head">
+          <h3>{title}</h3>
+          <span className={`small ${tone}`}>
+            {sign}
+            {formatMoney(total(list), { whole: true })} / month
+          </span>
+        </div>
+        <div className="cat-list">{list.map(row)}</div>
+      </section>
+    );
+  };
 
   return (
     <>
@@ -63,29 +77,14 @@ export function RecurringSettings() {
       {data.recurring.length === 0 ? (
         <div className="card">
           <Empty emoji="🔁" title="No monthly items yet">
-            Add your rent, loan, subscriptions and both salaries.
+            Add your rent, loan, subscriptions, both salaries and a fixed amount for savings.
           </Empty>
         </div>
       ) : (
         <>
-          {incomes.length > 0 && (
-            <section className="card">
-              <div className="card-head">
-                <h3>Income</h3>
-                <span className="pos small">+{formatMoney(total(incomes), { whole: true })} / month</span>
-              </div>
-              <div className="cat-list">{incomes.map(row)}</div>
-            </section>
-          )}
-          {expenses.length > 0 && (
-            <section className="card">
-              <div className="card-head">
-                <h3>Bills & fixed costs</h3>
-                <span className="small dim">−{formatMoney(total(expenses), { whole: true })} / month</span>
-              </div>
-              <div className="cat-list">{expenses.map(row)}</div>
-            </section>
-          )}
+          {section('income', 'Income', '+', 'pos')}
+          {section('saving', 'Savings', '', 'save')}
+          {section('expense', 'Bills & fixed costs', '−', 'dim')}
         </>
       )}
 
@@ -108,6 +107,7 @@ function RecurringSheet({ item, onClose }: { item: Recurring | null; onClose: ()
   const [name, setName] = useState(item?.name ?? '');
   const [amount, setAmount] = useState(item ? centsToInput(item.amount_cents) : '');
   const [categoryId, setCategoryId] = useState(item?.category_id ?? '');
+  const [accountId, setAccountId] = useState(item?.savings_account_id ?? '');
   const [person, setPerson] = useState(item ? (item.person_id ?? 'shared') : 'shared');
   const [day, setDay] = useState(String(item?.day_of_month ?? 1));
   const [start, setStart] = useState((item?.start_month ?? monthStart(currentMonth())).slice(0, 7));
@@ -115,14 +115,25 @@ function RecurringSheet({ item, onClose }: { item: Recurring | null; onClose: ()
   const [busy, setBusy] = useState(false);
 
   const people = data.profiles.filter((p) => p.active || p.id === item?.person_id);
-  const pickable = data.categories.filter((c) => c.owner_id === null || c.owner_id === data.userId || c.id === item?.category_id);
+  const pickable = data.categories.filter(
+    (c) => c.kind === kind && (c.owner_id === null || c.owner_id === data.userId || c.id === item?.category_id),
+  );
+  const accounts = data.savingsAccounts.filter(
+    (a) => (!a.archived && (a.owner_id === null || a.owner_id === data.userId)) || a.id === item?.savings_account_id,
+  );
+
+  function changeKind(k: Kind) {
+    setKind(k);
+    if (!data.categories.some((c) => c.id === categoryId && c.kind === k)) setCategoryId('');
+  }
 
   async function save() {
     const cents = parseAmount(amount);
     const d = Number(day);
     if (!name.trim()) return toast('Give it a name', 'error');
     if (cents === null) return toast('Enter a valid amount', 'error');
-    if (kind === 'expense' && !categoryId) return toast('Pick a category', 'error');
+    if (kind !== 'saving' && !categoryId) return toast('Pick a category', 'error');
+    if (kind === 'saving' && !accountId) return toast('Pick a savings account', 'error');
     if (!(d >= 1 && d <= 31)) return toast('Day must be between 1 and 31', 'error');
     if (!/^\d{4}-\d{2}$/.test(start)) return toast('Pick a start month', 'error');
     setBusy(true);
@@ -132,7 +143,8 @@ function RecurringSheet({ item, onClose }: { item: Recurring | null; onClose: ()
         kind,
         name: name.trim(),
         amount_cents: cents,
-        category_id: kind === 'expense' ? categoryId : null,
+        category_id: kind === 'saving' ? null : categoryId,
+        savings_account_id: kind === 'saving' ? accountId : null,
         person_id: person === 'shared' ? null : person,
         day_of_month: d,
         start_month: monthStart(start),
@@ -172,22 +184,40 @@ function RecurringSheet({ item, onClose }: { item: Recurring | null; onClose: ()
         <fieldset className="stack" disabled={!canEdit || busy}>
           <Segmented<Kind>
             value={kind}
-            onChange={setKind}
+            onChange={changeKind}
             options={[
               { value: 'expense', label: 'Expense' },
               { value: 'income', label: 'Income' },
+              { value: 'saving', label: 'Savings' },
             ]}
           />
           <div className="row-2">
             <Field label="Name">
-              <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={kind === 'income' ? 'Salary' : 'Rent'} maxLength={60} />
+              <input
+                className="input"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder={kind === 'income' ? 'Salary' : kind === 'saving' ? 'Monthly savings' : 'Rent'}
+                maxLength={60}
+              />
             </Field>
             <Field label="Amount (€)">
               <input className="input" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="0.00" />
             </Field>
           </div>
 
-          {kind === 'expense' && (
+          {kind === 'saving' ? (
+            <Field label="Savings account">
+              <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+                <option value="">{accounts.length ? 'Choose…' : 'Create an account in Savings first'}</option>
+                {accounts.map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.emoji} {a.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          ) : (
             <Field label="Category">
               <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
                 <option value="">Choose…</option>
@@ -201,7 +231,7 @@ function RecurringSheet({ item, onClose }: { item: Recurring | null; onClose: ()
           )}
 
           <div>
-            <div className="field-label">{kind === 'income' ? 'Whose income' : 'Who pays'}</div>
+            <div className="field-label">{kind === 'income' ? 'Whose income' : kind === 'saving' ? 'Who puts it in' : 'Who pays'}</div>
             <Segmented
               value={person}
               onChange={setPerson}

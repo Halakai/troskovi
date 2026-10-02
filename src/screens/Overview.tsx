@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react';
-import { useData } from '../data/DataProvider';
+import { useData, useReportInput } from '../data/DataProvider';
 import { monthReport, type MonthReport, type PersonStat } from '../lib/stats';
-import { addMonths, formatDay, formatMonth, formatMonthShort, todayISO, WEEKDAYS, yearOf } from '../lib/dates';
+import { addMonths, formatDay, formatMonth, formatMonthShort, WEEKDAYS, yearOf } from '../lib/dates';
 import { formatMoney, percent } from '../lib/money';
 import { navigate } from '../lib/router';
 import type { Transaction } from '../types';
@@ -24,21 +24,8 @@ export function Overview({ month, setMonth, onOpen }: Props) {
     ensureYear(yearOf(addMonths(month, -1)));
   }, [month, ensureYear]);
 
-  const report = useMemo(
-    () =>
-      monthReport(
-        {
-          transactions: data.allTransactions,
-          categories: data.categories,
-          limits: data.limits,
-          recurring: data.recurring,
-          profiles: data.profiles,
-          today: todayISO(),
-        },
-        month,
-      ),
-    [data.allTransactions, data.categories, data.limits, data.recurring, data.profiles, month],
-  );
+  const input = useReportInput();
+  const report = useMemo(() => monthReport(input, month), [input, month]);
 
   const recent = [...report.transactions]
     .sort((a, b) => b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at))
@@ -66,6 +53,8 @@ export function Overview({ month, setMonth, onOpen }: Props) {
           <MoneyFlow report={report} />
           <People report={report} />
           <Categories report={report} />
+          <Income report={report} />
+          <Savings report={report} />
           <FunStats report={report} />
           {recent.length > 0 && (
             <section className="card">
@@ -128,7 +117,7 @@ function MoneyFlow({ report }: { report: MonthReport }) {
   if (!report.income && !report.expectedIncome && !report.upcoming.length) {
     return (
       <section className="card card-tip">
-        💡 Add your salaries as <b>monthly income</b> (Settings → Monthly items) to see how much is left to spend each month –
+        💡 Add your salaries as <b>monthly income</b> (⚙️ → Monthly items) to see how much is left to spend each month –
         even before the second salary arrives.
       </section>
     );
@@ -157,6 +146,21 @@ function MoneyFlow({ report }: { report: MonthReport }) {
             <span>−{formatMoney(report.upcomingExpenses)}</span>
           </div>
         )}
+        {report.saved !== 0 && (
+          <div className="flow-row">
+            <span>{report.saved > 0 ? 'Put into savings' : 'Taken from savings'}</span>
+            <span className="save">
+              {report.saved > 0 ? '−' : '+'}
+              {formatMoney(Math.abs(report.saved))}
+            </span>
+          </div>
+        )}
+        {report.upcomingSavings > 0 && (
+          <div className="flow-row dim">
+            <span>Savings still planned</span>
+            <span className="save">−{formatMoney(report.upcomingSavings)}</span>
+          </div>
+        )}
         <div className="flow-row flow-total">
           <span>{report.isCurrent ? 'Left to spend' : 'Balance'}</span>
           <span className={report.leftToSpend < 0 ? 'text-danger' : 'pos'}>{formatMoney(report.leftToSpend, { sign: true })}</span>
@@ -168,10 +172,11 @@ function MoneyFlow({ report }: { report: MonthReport }) {
             <div key={item.id} className="upcoming-row">
               <IconRepeat />
               <span className="grow">
+                {item.kind === 'saving' && '🐷 '}
                 {item.name} <span className="dim">· {personName(item.person_id)}</span>
               </span>
               <span className="dim">{formatDay(date)}</span>
-              <span className={item.kind === 'income' ? 'pos' : ''}>
+              <span className={item.kind === 'income' ? 'pos' : item.kind === 'saving' ? 'save' : ''}>
                 {item.kind === 'income' ? '+' : '−'}
                 {formatMoney(item.amount_cents, { whole: true })}
               </span>
@@ -276,7 +281,7 @@ export function CategoryList({ stats, onPick, limitLabel = '' }: { stats: MonthR
               </>
             ) : (
               <span className="small dim">
-                {s.count} × · no limit
+                {s.count} ×{s.category.kind === 'expense' && ' · no limit'}
               </span>
             )}
           </span>
@@ -311,6 +316,51 @@ function Categories({ report }: { report: MonthReport }) {
         </div>
       )}
       <CategoryList stats={report.categories} onPick={(id) => navigate(`/history?cat=${id}`)} />
+    </section>
+  );
+}
+
+function Income({ report }: { report: MonthReport }) {
+  if (!report.income) return null;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3>Income</h3>
+        <span className="pos small">+{formatMoney(report.income, { whole: true })}</span>
+      </div>
+      <CategoryList stats={report.incomeCategories} onPick={(id) => navigate(`/history?kind=income&cat=${id}`)} />
+    </section>
+  );
+}
+
+function Savings({ report }: { report: MonthReport }) {
+  if (!report.saved && !report.upcomingSavings) return null;
+  return (
+    <section className="card">
+      <div className="card-head">
+        <h3>Savings</h3>
+        <button className="link" onClick={() => navigate('/savings')}>
+          Open savings
+        </button>
+      </div>
+      <div className="cat-list">
+        {report.savings.map(({ account, net }) => (
+          <button key={account.id} className="cat-row" onClick={() => navigate('/savings')}>
+            <CatIcon category={account} size={36} />
+            <span className="grow cat-row-name">{account.name}</span>
+            <b className="save">
+              {net > 0 ? '+' : '−'}
+              {formatMoney(Math.abs(net))}
+            </b>
+          </button>
+        ))}
+      </div>
+      {report.upcomingSavings > 0 && (
+        <p className="small dim">+{formatMoney(report.upcomingSavings)} more planned this month</p>
+      )}
+      {report.saved > 0 && report.income > 0 && (
+        <div className="verdict">🐷 {percent(report.saved, report.income)}% of this month's income went into savings</div>
+      )}
     </section>
   );
 }

@@ -1,9 +1,10 @@
 -- =====================================================================
 --  Troškovi – database schema for Supabase
 --
---  Run the whole file once in Supabase → SQL Editor (or `npm run db:apply`).
---  It is safe to re-run: tables are created only if missing, functions and
---  policies are replaced, and seed data is only inserted into empty tables.
+--  Run the whole file in Supabase → SQL Editor (or `npm run db:apply`).
+--  It is safe to re-run and it upgrades older versions in place: tables and
+--  columns are added only if missing, constraints, functions and policies are
+--  replaced, and seed data is only inserted where nothing exists yet.
 --
 --  Login works with username + password. Supabase Auth needs an e-mail, so
 --  every username is mapped to "<username>@troskovi.invalid" (the .invalid
@@ -27,21 +28,22 @@ create table if not exists public.profiles (
   created_at   timestamptz not null default now()
 );
 
+-- Two separate lists: kind 'expense' and kind 'income'.
 -- owner_id NULL = shared category, otherwise private to that person
--- (private categories are only offered in the owner's picker, but expenses
+-- (private categories are only offered in the owner's picker, but entries
 -- that use them are visible to everyone).
 create table if not exists public.categories (
   id         uuid primary key default gen_random_uuid(),
   name       text not null check (length(trim(name)) between 1 and 40),
   emoji      text not null default '📦',
   color      text not null default '#64748b',
+  kind       text not null default 'expense',
   owner_id   uuid references public.profiles(id) on delete cascade,
-  is_system  boolean not null default false,   -- the undeletable "Other" category
+  is_system  boolean not null default false,   -- the undeletable "Other" / "Other income"
   sort_order integer not null default 100,
   created_by uuid default auth.uid() references public.profiles(id) on delete set null,
   created_at timestamptz not null default now()
 );
-create unique index if not exists categories_single_system on public.categories (is_system) where is_system;
 
 -- Monthly limit per category. A row applies from effective_from (1st of a
 -- month) until the next row, so changing a limit never rewrites history.
@@ -53,39 +55,92 @@ create table if not exists public.category_limits (
   primary key (category_id, effective_from)
 );
 
--- Templates for things that repeat every month (rent, loan, salary, …).
--- person_id NULL = shared.
-create table if not exists public.recurring (
-  id             uuid primary key default gen_random_uuid(),
-  kind           text not null default 'expense' check (kind in ('expense', 'income')),
-  name           text not null check (length(trim(name)) between 1 and 60),
-  amount_cents   integer not null check (amount_cents > 0),
-  category_id    uuid references public.categories(id) on delete restrict,
-  person_id      uuid references public.profiles(id) on delete restrict,
-  day_of_month   smallint not null check (day_of_month between 1 and 31),
-  start_month    date not null default date_trunc('month', current_date)::date check (extract(day from start_month) = 1),
-  end_month      date check (end_month is null or extract(day from end_month) = 1),
-  posted_through date,   -- last month (1st) for which a transaction was created
-  active         boolean not null default true,
-  created_by     uuid not null default auth.uid() references public.profiles(id) on delete restrict,
-  created_at     timestamptz not null default now()
+-- Savings accounts ("Emergency fund", "Vacation", …). owner_id NULL = shared.
+-- Balance = initial_cents + all 'saving' transactions (deposits are positive,
+-- withdrawals negative).
+create table if not exists public.savings_accounts (
+  id            uuid primary key default gen_random_uuid(),
+  name          text not null check (length(trim(name)) between 1 and 40),
+  emoji         text not null default '🐷',
+  color         text not null default '#14b8a6',
+  owner_id      uuid references public.profiles(id) on delete restrict,
+  goal_cents    integer check (goal_cents is null or goal_cents > 0),
+  initial_cents integer not null default 0 check (initial_cents >= 0),   -- money already in it before tracking here
+  archived      boolean not null default false,
+  sort_order    integer not null default 100,
+  created_by    uuid default auth.uid() references public.profiles(id) on delete set null,
+  created_at    timestamptz not null default now()
 );
 
--- Expenses and incomes. person_id NULL = shared (e.g. rent).
+-- Templates for things that repeat every month (rent, loan, salary, savings…).
+-- person_id NULL = shared.
+create table if not exists public.recurring (
+  id                 uuid primary key default gen_random_uuid(),
+  kind               text not null default 'expense',
+  name               text not null check (length(trim(name)) between 1 and 60),
+  amount_cents       integer not null check (amount_cents > 0),
+  category_id        uuid references public.categories(id) on delete restrict,
+  savings_account_id uuid references public.savings_accounts(id) on delete cascade,
+  person_id          uuid references public.profiles(id) on delete restrict,
+  day_of_month       smallint not null check (day_of_month between 1 and 31),
+  start_month        date not null default date_trunc('month', current_date)::date check (extract(day from start_month) = 1),
+  end_month          date check (end_month is null or extract(day from end_month) = 1),
+  posted_through     date,   -- last month (1st) for which a transaction was created
+  active             boolean not null default true,
+  created_by         uuid not null default auth.uid() references public.profiles(id) on delete restrict,
+  created_at         timestamptz not null default now()
+);
+
+-- Expenses, incomes and savings movements. person_id NULL = shared (e.g. rent).
+-- kind 'saving': money put into (positive) or taken out of (negative) a savings account.
 create table if not exists public.transactions (
-  id           uuid primary key default gen_random_uuid(),
-  kind         text not null default 'expense' check (kind in ('expense', 'income')),
-  amount_cents integer not null check (amount_cents > 0),
-  category_id  uuid references public.categories(id) on delete restrict,
-  person_id    uuid references public.profiles(id) on delete restrict,
-  date         date not null default current_date,
-  note         text check (note is null or length(note) <= 200),
-  recurring_id uuid references public.recurring(id) on delete set null,
-  created_by   uuid not null default auth.uid() references public.profiles(id) on delete restrict,
-  created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
+  id                 uuid primary key default gen_random_uuid(),
+  kind               text not null default 'expense',
+  amount_cents       integer not null,
+  category_id        uuid references public.categories(id) on delete restrict,
+  savings_account_id uuid references public.savings_accounts(id) on delete restrict,
+  person_id          uuid references public.profiles(id) on delete restrict,
+  date               date not null default current_date,
+  note               text check (note is null or length(note) <= 200),
+  recurring_id       uuid references public.recurring(id) on delete set null,
+  created_by         uuid not null default auth.uid() references public.profiles(id) on delete restrict,
+  created_at         timestamptz not null default now(),
+  updated_at         timestamptz not null default now()
 );
 create index if not exists transactions_date_idx on public.transactions (date);
+
+-- ---------------------------------------------------------------------
+--  Upgrades for databases created by an older version of this file
+-- ---------------------------------------------------------------------
+
+alter table public.categories   add column if not exists kind text not null default 'expense';
+alter table public.recurring    add column if not exists savings_account_id uuid references public.savings_accounts(id) on delete cascade;
+alter table public.transactions add column if not exists savings_account_id uuid references public.savings_accounts(id) on delete restrict;
+
+-- ---------------------------------------------------------------------
+--  Constraints that changed over time (dropped and re-added on every run)
+-- ---------------------------------------------------------------------
+
+alter table public.categories drop constraint if exists categories_kind_check;
+alter table public.categories add constraint categories_kind_check check (kind in ('expense', 'income'));
+drop index if exists public.categories_single_system;
+create unique index if not exists categories_single_system_per_kind on public.categories (kind) where is_system;
+
+alter table public.recurring drop constraint if exists recurring_kind_check;
+alter table public.recurring add constraint recurring_kind_check check (kind in ('expense', 'income', 'saving'));
+alter table public.recurring drop constraint if exists recurring_savings_account_check;
+alter table public.recurring add constraint recurring_savings_account_check
+  check ((kind = 'saving') = (savings_account_id is not null));
+
+alter table public.transactions drop constraint if exists transactions_kind_check;
+alter table public.transactions add constraint transactions_kind_check check (kind in ('expense', 'income', 'saving'));
+alter table public.transactions drop constraint if exists transactions_amount_cents_check;
+alter table public.transactions add constraint transactions_amount_cents_check
+  check (amount_cents > 0 or (kind = 'saving' and amount_cents <> 0));
+alter table public.transactions drop constraint if exists transactions_savings_account_check;
+alter table public.transactions add constraint transactions_savings_account_check
+  check ((kind = 'saving') = (savings_account_id is not null));
+create index if not exists transactions_savings_idx on public.transactions (savings_account_id) where savings_account_id is not null;
 
 -- ---------------------------------------------------------------------
 --  Helpers
@@ -139,10 +194,35 @@ drop trigger if exists transactions_before_update on public.transactions;
 create trigger transactions_before_update before update on public.transactions
   for each row execute function public.tg_transactions_before_update();
 
+-- Keeps entries consistent: savings movements have an account and no category,
+-- expenses and incomes only use categories from their own list.
+create or replace function public.tg_entry_before_write() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  if new.kind = 'saving' then
+    new.category_id := null;
+  else
+    new.savings_account_id := null;
+    if new.category_id is not null
+       and not exists (select 1 from public.categories c where c.id = new.category_id and c.kind = new.kind) then
+      raise exception 'That category belongs to the % list', case new.kind when 'income' then 'expense' else 'income' end;
+    end if;
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists transactions_before_write on public.transactions;
+create trigger transactions_before_write before insert or update on public.transactions
+  for each row execute function public.tg_entry_before_write();
+drop trigger if exists recurring_before_write on public.recurring;
+create trigger recurring_before_write before insert or update on public.recurring
+  for each row execute function public.tg_entry_before_write();
+
 create or replace function public.tg_categories_before_update() returns trigger
 language plpgsql set search_path = '' as $$
 begin
   new.is_system := old.is_system;
+  new.kind := old.kind;   -- a category never moves between the expense and income lists
   if new.is_system then new.owner_id := null; end if;
   return new;
 end $$;
@@ -151,7 +231,7 @@ drop trigger if exists categories_before_update on public.categories;
 create trigger categories_before_update before update on public.categories
   for each row execute function public.tg_categories_before_update();
 
--- Deleting a category moves everything that used it to "Other".
+-- Deleting a category moves everything that used it to "Other" (or "Other income").
 create or replace function public.tg_categories_before_delete() returns trigger
 language plpgsql security definer set search_path = '' as $$
 declare
@@ -160,7 +240,7 @@ begin
   if old.is_system then
     raise exception 'The "%" category cannot be deleted', old.name;
   end if;
-  select id into v_other from public.categories where is_system limit 1;
+  select id into v_other from public.categories where is_system and kind = old.kind limit 1;
   update public.transactions set category_id = v_other where category_id = old.id;
   update public.recurring    set category_id = v_other where category_id = old.id;
   return old;
@@ -177,11 +257,12 @@ create trigger categories_before_delete before delete on public.categories
 --    * only the admin deletes transactions
 -- ---------------------------------------------------------------------
 
-alter table public.profiles        enable row level security;
-alter table public.categories      enable row level security;
-alter table public.category_limits enable row level security;
-alter table public.recurring       enable row level security;
-alter table public.transactions    enable row level security;
+alter table public.profiles         enable row level security;
+alter table public.categories       enable row level security;
+alter table public.category_limits  enable row level security;
+alter table public.savings_accounts enable row level security;
+alter table public.recurring        enable row level security;
+alter table public.transactions     enable row level security;
 
 -- profiles: read-only from the client, changed only through admin functions
 drop policy if exists profiles_select on public.profiles;
@@ -219,6 +300,24 @@ create policy category_limits_write on public.category_limits for all to authent
   with check (public.is_member() and exists (
     select 1 from public.categories c where c.id = category_id
       and (c.owner_id is null or c.owner_id = auth.uid() or public.is_admin())));
+
+-- savings accounts: like categories – shared ones are everyone's, personal ones the owner's
+drop policy if exists savings_accounts_select on public.savings_accounts;
+create policy savings_accounts_select on public.savings_accounts for select to authenticated
+  using (public.is_member());
+
+drop policy if exists savings_accounts_insert on public.savings_accounts;
+create policy savings_accounts_insert on public.savings_accounts for insert to authenticated
+  with check (public.is_member() and (owner_id is null or owner_id = auth.uid()));
+
+drop policy if exists savings_accounts_update on public.savings_accounts;
+create policy savings_accounts_update on public.savings_accounts for update to authenticated
+  using (public.is_admin() or (public.is_member() and (owner_id is null or owner_id = auth.uid())))
+  with check (public.is_admin() or (public.is_member() and (owner_id is null or owner_id = auth.uid())));
+
+drop policy if exists savings_accounts_delete on public.savings_accounts;
+create policy savings_accounts_delete on public.savings_accounts for delete to authenticated
+  using (public.is_admin() or (public.is_member() and owner_id = auth.uid()));
 
 -- recurring templates
 drop policy if exists recurring_select on public.recurring;
@@ -370,7 +469,7 @@ begin
   begin
     delete from auth.users where id = p_user_id;
   exception when foreign_key_violation or restrict_violation then
-    raise exception 'This person already has transactions or recurring items – disable the account instead';
+    raise exception 'This person already has entries, monthly items or savings accounts – disable the account instead';
   end;
 end $$;
 
@@ -394,6 +493,7 @@ end $$;
 --  Recurring items: the app calls this on start-up. It creates every
 --  transaction that is due (day reached) and not yet created. Each month is
 --  posted exactly once, even if the posted transaction is later deleted.
+--  Items that pay into an archived savings account are skipped.
 -- ---------------------------------------------------------------------
 
 create or replace function public.apply_recurring(p_today date default current_date) returns integer
@@ -410,7 +510,13 @@ begin
   -- the client sends its local date; don't trust it beyond normal timezone skew
   if v_today is null or abs(v_today - current_date) > 1 then v_today := current_date; end if;
 
-  for r in select * from public.recurring where active order by created_at for update loop
+  for r in
+    select * from public.recurring rc
+     where rc.active
+       and not exists (select 1 from public.savings_accounts a where a.id = rc.savings_account_id and a.archived)
+     order by rc.created_at
+       for update
+  loop
     v_month := greatest(coalesce((r.posted_through + interval '1 month')::date, r.start_month), r.start_month);
     while v_month <= date_trunc('month', v_today)::date
           and (r.end_month is null or v_month <= r.end_month) loop
@@ -418,8 +524,10 @@ begin
       v_date := v_month + (least(r.day_of_month, v_last_day) - 1);
       exit when v_date > v_today;
 
-      insert into public.transactions (kind, amount_cents, category_id, person_id, date, note, recurring_id, created_by)
-      values (r.kind, r.amount_cents, r.category_id, r.person_id, v_date, r.name, r.id, r.created_by);
+      insert into public.transactions
+        (kind, amount_cents, category_id, savings_account_id, person_id, date, note, recurring_id, created_by)
+      values
+        (r.kind, r.amount_cents, r.category_id, r.savings_account_id, r.person_id, v_date, r.name, r.id, r.created_by);
       update public.recurring set posted_through = v_month where id = r.id;
 
       v_count := v_count + 1;
@@ -433,9 +541,11 @@ end $$;
 --  Privileges
 -- ---------------------------------------------------------------------
 
-revoke all on public.profiles, public.categories, public.category_limits, public.recurring, public.transactions from anon;
+revoke all on public.profiles, public.categories, public.category_limits, public.savings_accounts,
+              public.recurring, public.transactions from anon;
 grant select on public.profiles to authenticated;
-grant select, insert, update, delete on public.categories, public.category_limits, public.recurring, public.transactions to authenticated;
+grant select, insert, update, delete on public.categories, public.category_limits, public.savings_accounts,
+                                        public.recurring, public.transactions to authenticated;
 
 revoke execute on function public._create_user(text, text, text, boolean, text) from public, anon, authenticated;
 revoke execute on function public._email_for(text) from public, anon, authenticated;
@@ -468,7 +578,7 @@ do $$
 declare
   t text;
 begin
-  foreach t in array array['profiles', 'categories', 'category_limits', 'recurring', 'transactions'] loop
+  foreach t in array array['profiles', 'categories', 'category_limits', 'savings_accounts', 'recurring', 'transactions'] loop
     if not exists (select 1 from pg_publication_tables
                     where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t) then
       execute format('alter publication supabase_realtime add table public.%I', t);
@@ -480,8 +590,8 @@ end $$;
 --  Seed data
 -- ---------------------------------------------------------------------
 
-insert into public.categories (name, emoji, color, sort_order, is_system)
-select v.name, v.emoji, v.color, v.sort_order, v.is_system
+insert into public.categories (name, emoji, color, sort_order, is_system, kind)
+select v.name, v.emoji, v.color, v.sort_order, v.is_system, 'expense'
 from (values
   ('Groceries',            '🛒', '#22c55e',  10, false),
   ('Restaurants & Coffee', '☕', '#f97316',  20, false),
@@ -497,7 +607,19 @@ from (values
   ('Household',            '🧹', '#84cc16', 110, false),
   ('Other',                '📦', '#64748b', 999, true)
 ) as v(name, emoji, color, sort_order, is_system)
-where not exists (select 1 from public.categories);
+where not exists (select 1 from public.categories where kind = 'expense');
+
+insert into public.categories (name, emoji, color, sort_order, is_system, kind)
+select v.name, v.emoji, v.color, v.sort_order, v.is_system, 'income'
+from (values
+  ('Salary',       '💼', '#22c55e',  10, false),
+  ('Bonus',        '🎉', '#eab308',  20, false),
+  ('Side income',  '💻', '#0ea5e9',  30, false),
+  ('Gifts',        '🎁', '#f43f5e',  40, false),
+  ('Refunds',      '↩️', '#14b8a6',  50, false),
+  ('Other income', '💰', '#64748b', 999, true)
+) as v(name, emoji, color, sort_order, is_system)
+where not exists (select 1 from public.categories where kind = 'income');
 
 -- First admin account: david / admin  (change the password in the app!)
 select public._create_user('david', 'admin', 'David', true, '#3b82f6')

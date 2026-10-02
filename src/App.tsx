@@ -5,13 +5,15 @@ import { DataProvider, useData } from './data/DataProvider';
 import { useTheme, type ThemePref } from './lib/theme';
 import { navigate, useRoute } from './lib/router';
 import { currentMonth, defaultDateFor, todayISO, yearOf } from './lib/dates';
+import { takeUpdatedFlag, useAutoUpdate } from './lib/pwa';
 import type { Transaction } from './types';
-import { ToastProvider } from './components/Toast';
-import { TxSheet } from './components/TxSheet';
-import { IconChart, IconGear, IconHome, IconList, IconPlus } from './components/Icons';
+import { ToastProvider, useToast } from './components/Toast';
+import { TxSheet, type NewEntryDefaults } from './components/TxSheet';
+import { IconChart, IconHome, IconList, IconPiggy, IconPlus } from './components/Icons';
 import { Login } from './screens/Login';
 import { Overview } from './screens/Overview';
 import { History } from './screens/History';
+import { Savings } from './screens/Savings';
 import { Year } from './screens/Year';
 import { Settings } from './screens/Settings';
 import { CategoriesSettings } from './screens/CategoriesSettings';
@@ -21,6 +23,7 @@ import { UsersSettings } from './screens/UsersSettings';
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
   const [theme, setTheme] = useTheme();
+  useAutoUpdate();
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -44,6 +47,7 @@ export function App() {
 
   return (
     <ToastProvider>
+      <UpdatedNotice />
       {session ? (
         <DataProvider key={session.user.id} userId={session.user.id}>
           <Shell theme={theme} setTheme={setTheme} />
@@ -53,6 +57,14 @@ export function App() {
       )}
     </ToastProvider>
   );
+}
+
+function UpdatedNotice() {
+  const toast = useToast();
+  useEffect(() => {
+    if (takeUpdatedFlag()) toast('✨ Updated to the newest version', 'info');
+  }, [toast]);
+  return null;
 }
 
 async function signOut() {
@@ -79,7 +91,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
   const [path, params] = useRoute();
   const [month, setMonth] = useState(currentMonth);
   const [year, setYear] = useState(() => new Date().getFullYear());
-  const [sheet, setSheet] = useState<{ tx: Transaction | null; date?: string } | null>(null);
+  const [sheet, setSheet] = useState<{ tx: Transaction | null; defaults?: NewEntryDefaults } | null>(null);
 
   if (!data.ready) {
     return data.syncError ? (
@@ -93,13 +105,18 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
   }
 
   const open = (tx: Transaction) => setSheet({ tx });
+  const add = (defaults: NewEntryDefaults) => setSheet({ tx: null, defaults: { date: todayISO(), ...defaults } });
   let screen;
-  // screens with the month selector: new entries start in the month being viewed
-  let showsMonth = false;
+  // what + adds: screens with the month selector start new entries in the month being viewed
+  let plusDefaults = (): NewEntryDefaults => ({ date: todayISO() });
   switch (path) {
     case '/history':
-      showsMonth = true;
+      plusDefaults = () => ({ date: defaultDateFor(month) });
       screen = <History month={month} setMonth={setMonth} params={params} onOpen={open} />;
+      break;
+    case '/savings':
+      plusDefaults = () => ({ date: todayISO(), kind: 'saving' });
+      screen = <Savings params={params} onAdd={add} onOpen={open} />;
       break;
     case '/year':
       screen = (
@@ -117,7 +134,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
       screen = <Settings theme={theme} setTheme={setTheme} onSignOut={signOut} />;
       break;
     case '/settings/categories':
-      screen = <CategoriesSettings />;
+      screen = <CategoriesSettings params={params} />;
       break;
     case '/settings/recurring':
       screen = <RecurringSettings />;
@@ -126,7 +143,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
       screen = <UsersSettings />;
       break;
     default:
-      showsMonth = true;
+      plusDefaults = () => ({ date: defaultDateFor(month) });
       screen = (
         <Overview
           month={month}
@@ -152,17 +169,13 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
       <nav className="tabbar">
         {tab('/', 'Month', <IconHome />, path === '/')}
         {tab('/history', 'History', <IconList />, path === '/history')}
-        <button
-          className="fab"
-          onClick={() => setSheet({ tx: null, date: showsMonth ? defaultDateFor(month) : todayISO() })}
-          aria-label="Add expense"
-        >
+        <button className="fab" onClick={() => setSheet({ tx: null, defaults: plusDefaults() })} aria-label="Add entry">
           <IconPlus width={28} height={28} />
         </button>
+        {tab('/savings', 'Savings', <IconPiggy />, path === '/savings')}
         {tab('/year', 'Year', <IconChart />, path === '/year')}
-        {tab('/settings', 'Settings', <IconGear />, path.startsWith('/settings'))}
       </nav>
-      {sheet && <TxSheet tx={sheet.tx} defaultDate={sheet.date} onClose={() => setSheet(null)} />}
+      {sheet && <TxSheet tx={sheet.tx} defaults={sheet.defaults} onClose={() => setSheet(null)} />}
     </div>
   );
 }

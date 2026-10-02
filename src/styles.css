@@ -10,6 +10,7 @@
   --accent: #6d5dfc;
   --accent-text: #ffffff;
   --ok: #16a34a;
+  --save: #0d9488;
   --warn: #d97706;
   --danger: #dc2626;
   --shadow: 0 1px 2px rgb(16 24 40 / 0.04), 0 4px 16px rgb(16 24 40 / 0.04);
@@ -27,6 +28,7 @@
     --dim: #9aa3b2;
     --accent: #8b7dff;
     --ok: #34d399;
+    --save: #2dd4bf;
     --warn: #fbbf24;
     --danger: #f87171;
     --shadow: none;
@@ -43,6 +45,7 @@
   --dim: #9aa3b2;
   --accent: #8b7dff;
   --ok: #34d399;
+  --save: #2dd4bf;
   --warn: #fbbf24;
   --danger: #f87171;
   --shadow: none;
@@ -138,6 +141,9 @@ code {
 }
 .pos {
   color: var(--ok);
+}
+.save {
+  color: var(--save);
 }
 .text-danger {
   color: var(--danger);
@@ -329,6 +335,10 @@ code {
 .chip-good {
   color: var(--ok);
   background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.chip-save {
+  color: var(--save);
+  background: color-mix(in srgb, var(--save) 14%, transparent);
 }
 .chip-bad {
   color: var(--danger);
@@ -632,6 +642,13 @@ code {
 .bar-spent {
   background: var(--accent);
 }
+.bar-saved {
+  background: var(--save);
+}
+.bar-out {
+  background: var(--danger);
+  opacity: 0.6;
+}
 .bar-income {
   background: var(--ok);
   opacity: 0.7;
@@ -754,6 +771,9 @@ code {
 }
 .summary-line b {
   color: var(--text);
+}
+.summary-line b.save {
+  color: var(--save);
 }
 .summary-line b.pos {
   color: var(--ok);
@@ -1069,6 +1089,10 @@ input[type='month'].input {
   background: var(--accent);
   color: var(--accent-text);
 }
+.btn-save {
+  background: var(--save);
+  color: var(--surface);
+}
 .btn-danger {
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
@@ -1318,4 +1342,58 @@ h3 + .menu .menu-item:first-child {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* ---------------------------------------------------------------- savings */
+
+.hero-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+.hero-actions .btn {
+  flex: 1;
+}
+
+.account-summary {
+  text-align: center;
+  margin-bottom: 18px;
+  padding: 14px;
+  border-radius: 16px;
+  background: var(--surface-2);
+}
+.account-balance {
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.account-people {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.account-people .chip {
+  background: var(--surface);
+}
+
+.archived summary {
+  cursor: pointer;
+  color: var(--dim);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 10px 0 4px;
+}
+
+.notice {
+  padding: 12px 14px;
+  border: 1px solid;
+  border-radius: 14px;
+  font-size: 14px;
+}
+
+.tabs {
+  margin-bottom: 12px;
 }

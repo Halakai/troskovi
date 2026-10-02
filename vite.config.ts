@@ -8,10 +8,16 @@ const base = process.env.BASE_PATH || '/';
 
 export default defineConfig({
   base,
+  define: {
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
+  // one bundle (~150 KB gzipped) that the service worker caches on the phone – no need to split it
+  build: { chunkSizeWarningLimit: 700 },
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // the app decides when to switch to a new version (src/lib/pwa.ts), so nobody loses a half-typed entry
+      registerType: 'prompt',
       includeAssets: ['favicon.svg', 'apple-touch-icon-180x180.png'],
       manifest: {
         name: 'Troškovi',

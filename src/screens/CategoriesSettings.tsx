@@ -1,24 +1,30 @@
 import { useState } from 'react';
 import { useData } from '../data/DataProvider';
 import { errorMessage } from '../supabase';
-import type { Category } from '../types';
+import type { Category, CategoryKind } from '../types';
 import { currentMonth, formatMonth } from '../lib/dates';
 import { centsToInput, formatMoney, parseAmount } from '../lib/money';
 import { limitFor } from '../lib/stats';
+import { navigate } from '../lib/router';
 import { useToast } from '../components/Toast';
-import { CatIcon, ColorPicker, Field, PALETTE, Sheet, Toggle, TopBar } from '../components/ui';
+import { CatIcon, ColorPicker, Field, PALETTE, Segmented, Sheet, Toggle, TopBar } from '../components/ui';
 import { IconLock, IconPlus, IconRight } from '../components/Icons';
 
-const EMOJIS = ['🛒', '☕', '🍕', '⛽', '🚗', '🏠', '💡', '📱', '💊', '👕', '🎬', '🎁', '✈️', '🧹', '🐶', '👶', '🎓', '💄', '🏋️', '🚬', '🍺', '📚', '🎮', '🏦'];
+const EMOJIS: Record<CategoryKind, string[]> = {
+  expense: ['🛒', '☕', '🍕', '⛽', '🚗', '🏠', '💡', '📱', '💊', '👕', '🎬', '🎁', '✈️', '🧹', '🐶', '👶', '🎓', '💄', '🏋️', '🚬', '🍺', '📚', '🎮', '🏦'],
+  income: ['💼', '💰', '🎉', '💻', '🎁', '↩️', '📈', '🏆', '🧾', '🏠', '🚗', '👶', '🎓', '🏦', '💶', '🤝'],
+};
 
-export function CategoriesSettings() {
+export function CategoriesSettings({ params }: { params: URLSearchParams }) {
   const data = useData();
+  const kind: CategoryKind = params.get('kind') === 'income' ? 'income' : 'expense';
   const [editing, setEditing] = useState<Category | 'new' | null>(null);
   const month = currentMonth();
 
-  const shared = data.categories.filter((c) => c.owner_id === null);
-  const mine = data.categories.filter((c) => c.owner_id === data.userId);
-  const others = data.categories.filter((c) => c.owner_id !== null && c.owner_id !== data.userId);
+  const list = data.categories.filter((c) => c.kind === kind);
+  const shared = list.filter((c) => c.owner_id === null);
+  const mine = list.filter((c) => c.owner_id === data.userId);
+  const others = list.filter((c) => c.owner_id !== null && c.owner_id !== data.userId);
   const ownerName = (id: string) => data.profiles.find((p) => p.id === id)?.display_name ?? '?';
 
   const row = (c: Category) => {
@@ -29,8 +35,8 @@ export function CategoriesSettings() {
         <span className="grow">
           <span className="cat-row-name">{c.name}</span>
           <span className="small dim block">
-            {limit !== null ? `Limit ${formatMoney(limit, { whole: true })} / month` : 'No limit'}
-            {c.is_system && ' · default for deleted categories'}
+            {kind === 'expense' && (limit !== null ? `Limit ${formatMoney(limit, { whole: true })} / month` : 'No limit')}
+            {c.is_system && (kind === 'expense' ? ' · ' : '') + 'default for deleted categories'}
           </span>
         </span>
         <IconRight className="dim" />
@@ -50,9 +56,21 @@ export function CategoriesSettings() {
         }
       />
 
+      <div className="tabs">
+        <Segmented<CategoryKind>
+          value={kind}
+          onChange={(k) => navigate(`/settings/categories${k === 'income' ? '?kind=income' : ''}`)}
+          options={[
+            { value: 'expense', label: 'Expenses' },
+            { value: 'income', label: 'Income' },
+          ]}
+        />
+      </div>
+
       <p className="page-note">
-        Shared categories are visible to everyone. Private ones appear only in your own list when adding an expense – but the
-        expenses themselves are still visible to everyone.
+        {kind === 'expense' ? 'Expense' : 'Income'} categories are a separate list. Shared ones are visible to everyone;
+        private ones appear only in your own list when adding an entry – but the entries themselves are still visible to
+        everyone.
       </p>
 
       <section className="card">
@@ -82,20 +100,21 @@ export function CategoriesSettings() {
       )}
 
       <button className="btn btn-primary btn-block" onClick={() => setEditing('new')}>
-        Add category
+        Add {kind} category
       </button>
 
-      {editing && <CategorySheet category={editing === 'new' ? null : editing} onClose={() => setEditing(null)} />}
+      {editing && <CategorySheet category={editing === 'new' ? null : editing} kind={kind} onClose={() => setEditing(null)} />}
     </>
   );
 }
 
-function CategorySheet({ category, onClose }: { category: Category | null; onClose: () => void }) {
+function CategorySheet({ category, kind, onClose }: { category: Category | null; kind: CategoryKind; onClose: () => void }) {
   const data = useData();
   const toast = useToast();
   const month = currentMonth();
   const isNew = category === null;
   const currentLimit = category ? limitFor(data.limits, category.id, month) : null;
+  const otherName = kind === 'income' ? 'Other income' : 'Other';
 
   const canEdit = isNew || data.isAdmin || category.owner_id === null || category.owner_id === data.userId;
   const canDelete = !isNew && !category.is_system && (data.isAdmin || category.owner_id === data.userId);
@@ -114,8 +133,15 @@ function CategorySheet({ category, onClose }: { category: Category | null; onClo
     setBusy(true);
     try {
       const owner = isPrivate ? (category?.owner_id ?? data.userId) : null;
-      const saved = await data.saveCategory({ id: category?.id, name: name.trim(), emoji: firstEmoji(emoji) || '🏷️', color, owner_id: owner });
-      if (limitCents !== currentLimit) await data.setLimit(saved.id, month, limitCents);
+      const saved = await data.saveCategory({
+        id: category?.id,
+        name: name.trim(),
+        emoji: firstEmoji(emoji) || '🏷️',
+        color,
+        owner_id: owner,
+        kind: category?.kind ?? kind,
+      });
+      if (kind === 'expense' && limitCents !== currentLimit) await data.setLimit(saved.id, month, limitCents);
       toast(isNew ? 'Category added' : 'Saved');
       onClose();
     } catch (e) {
@@ -126,11 +152,11 @@ function CategorySheet({ category, onClose }: { category: Category | null; onClo
   }
 
   async function remove() {
-    if (!category || !confirm(`Delete "${category.name}"? Its expenses will move to "Other".`)) return;
+    if (!category || !confirm(`Delete "${category.name}"? Its entries will move to "${otherName}".`)) return;
     setBusy(true);
     try {
       await data.deleteCategory(category.id);
-      toast('Deleted – expenses moved to Other');
+      toast(`Deleted – entries moved to ${otherName}`);
       onClose();
     } catch (e) {
       toast(errorMessage(e), 'error');
@@ -139,7 +165,7 @@ function CategorySheet({ category, onClose }: { category: Category | null; onClo
   }
 
   return (
-    <Sheet title={isNew ? 'New category' : 'Edit category'} onClose={onClose}>
+    <Sheet title={isNew ? `New ${kind} category` : 'Edit category'} onClose={onClose}>
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -155,7 +181,7 @@ function CategorySheet({ category, onClose }: { category: Category | null; onClo
           <div>
             <div className="field-label">Icon – pick one or type any emoji</div>
             <div className="emoji-grid">
-              {EMOJIS.map((e) => (
+              {EMOJIS[kind].map((e) => (
                 <button type="button" key={e} className={`emoji ${e === emoji ? 'emoji-on' : ''}`} onClick={() => setEmoji(e)}>
                   {e}
                 </button>
@@ -169,9 +195,11 @@ function CategorySheet({ category, onClose }: { category: Category | null; onClo
             <ColorPicker value={color} onChange={setColor} />
           </div>
 
-          <Field label="Monthly limit (optional)" hint={`Applies from ${formatMonth(month)} on – earlier months keep their old limit`}>
-            <input className="input" inputMode="decimal" placeholder="e.g. 300" value={limit} onChange={(e) => setLimitText(e.target.value)} />
-          </Field>
+          {kind === 'expense' && (
+            <Field label="Monthly limit (optional)" hint={`Applies from ${formatMonth(month)} on – earlier months keep their old limit`}>
+              <input className="input" inputMode="decimal" placeholder="e.g. 300" value={limit} onChange={(e) => setLimitText(e.target.value)} />
+            </Field>
+          )}
 
           {canChangePrivacy && (
             <Toggle

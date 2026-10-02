@@ -1,10 +1,10 @@
 import { useEffect, useMemo } from 'react';
-import { useData } from '../data/DataProvider';
+import { useData, useReportInput } from '../data/DataProvider';
 import { yearReport } from '../lib/stats';
-import { formatMonth, formatMonthShort, todayISO } from '../lib/dates';
+import { formatMonth, formatMonthShort } from '../lib/dates';
 import { formatMoney, percent } from '../lib/money';
 import { navigate } from '../lib/router';
-import { Empty, TopBar, YearSwitcher, useLookups } from '../components/ui';
+import { CatIcon, Empty, TopBar, YearSwitcher, useLookups } from '../components/ui';
 import { CategoryList, PeopleBlock } from './Overview';
 
 interface Props {
@@ -20,24 +20,12 @@ export function Year({ year, setYear, openMonth }: Props) {
 
   useEffect(() => ensureYear(year), [year, ensureYear]);
 
-  const report = useMemo(
-    () =>
-      yearReport(
-        {
-          transactions: data.allTransactions,
-          categories: data.categories,
-          limits: data.limits,
-          recurring: data.recurring,
-          profiles: data.profiles,
-          today: todayISO(),
-        },
-        year,
-      ),
-    [data.allTransactions, data.categories, data.limits, data.recurring, data.profiles, year],
-  );
+  const input = useReportInput();
+  const report = useMemo(() => yearReport(input, year), [input, year]);
 
-  const maxBar = Math.max(1, ...report.months.map((m) => Math.max(m.spent, m.income)));
+  const maxBar = Math.max(1, ...report.months.map((m) => Math.max(m.spent, m.income, m.saved)));
   const hasIncome = report.income > 0;
+  const hasSavings = report.months.some((m) => m.saved > 0);
   const people = report.people.filter((p) => p.id !== null);
   const champion = [...report.monthsWon.entries()].sort((a, b) => b[1] - a[1])[0];
   const monthsWithData = report.months.filter((m) => m.spent > 0).length;
@@ -46,7 +34,7 @@ export function Year({ year, setYear, openMonth }: Props) {
     <>
       <TopBar title={<YearSwitcher year={year} onChange={setYear} />} />
 
-      {report.spent === 0 && report.income === 0 ? (
+      {report.spent === 0 && report.income === 0 && report.saved === 0 ? (
         <div className="card">
           {data.yearLoading(year) ? <Empty emoji="⏳" title="Loading…" /> : <Empty emoji="📭" title={`No entries in ${year}`} />}
         </div>
@@ -57,10 +45,15 @@ export function Year({ year, setYear, openMonth }: Props) {
             <div className="hero-amount">{formatMoney(report.spent, { whole: true })}</div>
             <div className="hero-chips">
               <span className="chip">⌀ {formatMoney(report.averagePerMonth, { whole: true })} / month</span>
+              {report.saved !== 0 && (
+                <span className="chip chip-save">
+                  🐷 {formatMoney(report.saved, { whole: true })} into savings
+                  {report.saved > 0 && hasIncome && ` (${percent(report.saved, report.income)}%)`}
+                </span>
+              )}
               {hasIncome && (
-                <span className={`chip ${report.saved >= 0 ? 'chip-good' : 'chip-bad'}`}>
-                  {report.saved >= 0 ? '🐷 saved' : '⚠️ short'} {formatMoney(Math.abs(report.saved), { whole: true })}
-                  {report.saved > 0 && ` (${percent(report.saved, report.income)}%)`}
+                <span className={`chip ${report.leftOver >= 0 ? 'chip-good' : 'chip-bad'}`}>
+                  {report.leftOver >= 0 ? '💶 left over' : '⚠️ short'} {formatMoney(Math.abs(report.leftOver), { whole: true })}
                 </span>
               )}
             </div>
@@ -74,6 +67,7 @@ export function Year({ year, setYear, openMonth }: Props) {
                   <span className="bar-stack">
                     {hasIncome && <span className="bar bar-income" style={{ height: `${(m.income / maxBar) * 100}%` }} />}
                     <span className="bar bar-spent" style={{ height: `${(m.spent / maxBar) * 100}%` }} />
+                    {hasSavings && <span className="bar bar-saved" style={{ height: `${(Math.max(0, m.saved) / maxBar) * 100}%` }} />}
                   </span>
                   <span className="bar-label">{formatMonthShort(m.month).slice(0, 1)}</span>
                 </button>
@@ -88,7 +82,12 @@ export function Year({ year, setYear, openMonth }: Props) {
                   <span className="dot" style={{ background: 'var(--ok)' }} /> Income
                 </span>
               )}
-              <span className="dim">Tap a month to open it</span>
+              {hasSavings && (
+                <span>
+                  <span className="dot" style={{ background: 'var(--save)' }} /> Saved
+                </span>
+              )}
+              <span className="dim">Tap a month</span>
             </div>
           </section>
 
@@ -107,6 +106,39 @@ export function Year({ year, setYear, openMonth }: Props) {
             <p className="small dim card-note">Limits are added up for the {report.elapsedMonths} months so far.</p>
             <CategoryList stats={report.categories} />
           </section>
+
+          {hasIncome && (
+            <section className="card">
+              <div className="card-head">
+                <h3>Income</h3>
+                <span className="pos small">+{formatMoney(report.income, { whole: true })}</span>
+              </div>
+              <CategoryList stats={report.incomeCategories} />
+            </section>
+          )}
+
+          {report.savings.length > 0 && (
+            <section className="card">
+              <div className="card-head">
+                <h3>Savings</h3>
+                <button className="link" onClick={() => navigate('/savings')}>
+                  Open savings
+                </button>
+              </div>
+              <div className="cat-list">
+                {report.savings.map(({ account, net }) => (
+                  <div key={account.id} className="cat-row">
+                    <CatIcon category={account} size={36} />
+                    <span className="grow cat-row-name">{account.name}</span>
+                    <b className="save">
+                      {net > 0 ? '+' : '−'}
+                      {formatMoney(Math.abs(net), { whole: true })}
+                    </b>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section className="card">
             <h3>Highlights</h3>

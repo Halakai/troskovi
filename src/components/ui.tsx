@@ -3,19 +3,21 @@ import { createPortal } from 'react-dom';
 import { useData } from '../data/DataProvider';
 import { addMonths, currentMonth, formatDMY, formatMonth } from '../lib/dates';
 import { navigate } from '../lib/router';
-import { SHARED_COLOR } from '../lib/stats';
-import type { Category } from '../types';
-import { IconBack, IconCalendar, IconClose, IconCloudOff, IconLeft, IconRight } from './Icons';
+import { categoryResolver, SHARED_COLOR } from '../lib/stats';
+import type { Category, CategoryKind, SavingsAccount } from '../types';
+import { IconBack, IconCalendar, IconClose, IconCloudOff, IconGear, IconLeft, IconRight } from './Icons';
 
 // ---------------------------------------------------------------- lookups
 
 export function useLookups() {
-  const { categories, profiles } = useData();
-  const catById = new Map(categories.map((c) => [c.id, c]));
-  const other = categories.find((c) => c.is_system);
+  const { categories, profiles, savingsAccounts } = useData();
+  const resolve = categoryResolver(categories);
   const personById = new Map(profiles.map((p) => [p.id, p]));
+  const accountById = new Map(savingsAccounts.map((a) => [a.id, a]));
   return {
-    category: (id: string | null): Category | undefined => (id && catById.get(id)) || other,
+    /** unknown / missing categories resolve to "Other" (or "Other income") */
+    category: (id: string | null, kind: CategoryKind = 'expense'): Category | undefined => resolve(id, kind),
+    account: (id: string | null): SavingsAccount | undefined => (id ? accountById.get(id) : undefined),
     personName: (id: string | null) => (id ? (personById.get(id)?.display_name ?? 'Unknown') : 'Shared'),
     personColor: (id: string | null) => (id ? (personById.get(id)?.color ?? SHARED_COLOR) : SHARED_COLOR),
   };
@@ -23,6 +25,7 @@ export function useLookups() {
 
 // ---------------------------------------------------------------- layout
 
+/** Screens without a back arrow get the settings gear. */
 export function TopBar({ title, back, right }: { title: ReactNode; back?: string; right?: ReactNode }) {
   const { live, pendingCount, syncError, refresh } = useData();
   return (
@@ -35,6 +38,11 @@ export function TopBar({ title, back, right }: { title: ReactNode; back?: string
       <div className="topbar-title">{title}</div>
       <div className="topbar-right">
         {right}
+        {!back && (
+          <button className="icon-btn" onClick={() => navigate('/settings')} aria-label="Settings">
+            <IconGear width={22} height={22} />
+          </button>
+        )}
         <button
           className={`sync ${live && !syncError ? 'sync-live' : 'sync-off'}`}
           onClick={() => refresh()}
@@ -144,9 +152,10 @@ export function Segmented<T extends string>({
   );
 }
 
-export function Progress({ value, max, color }: { value: number; max: number; color?: string }) {
+/** Spending against a limit (turns amber/red near and over it), or with `goal` progress towards a target. */
+export function Progress({ value, max, color, goal }: { value: number; max: number; color?: string; goal?: boolean }) {
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : value > 0 ? 100 : 0;
-  const state = max > 0 && value > max ? 'over' : max > 0 && value > max * 0.85 ? 'near' : 'ok';
+  const state = goal ? 'ok' : max > 0 && value > max ? 'over' : max > 0 && value > max * 0.85 ? 'near' : 'ok';
   return (
     <div className={`progress progress-${state}`}>
       <div style={{ width: `${pct}%`, ...(color && state === 'ok' ? { background: color } : {}) }} />
@@ -162,7 +171,8 @@ export function Avatar({ name, color, size = 32 }: { name: string; color: string
   );
 }
 
-export function CatIcon({ category, size = 40 }: { category?: Category; size?: number }) {
+/** Emoji on a tinted square – for categories and savings accounts. */
+export function CatIcon({ category, size = 40 }: { category?: Pick<Category, 'emoji' | 'color'>; size?: number }) {
   return (
     <span
       className="cat-icon"

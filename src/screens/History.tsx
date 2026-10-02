@@ -3,6 +3,7 @@ import { useData } from '../data/DataProvider';
 import { formatDayHeading, formatMonth, monthOf, yearOf } from '../lib/dates';
 import { formatMoney } from '../lib/money';
 import { navigate } from '../lib/router';
+import { categoryResolver } from '../lib/stats';
 import type { Transaction } from '../types';
 import { Empty, MonthSwitcher, TopBar } from '../components/ui';
 import { TxRow } from '../components/TxRow';
@@ -27,23 +28,30 @@ export function History({ month, setMonth, params, onOpen }: Props) {
     const next = new URLSearchParams(params);
     if (value === 'all') next.delete(key);
     else next.set(key, value);
+    if (key === 'kind') next.delete('cat'); // categories differ per type
     const q = next.toString();
     navigate(`/history${q ? `?${q}` : ''}`);
   };
 
   const people = data.profiles.filter((p) => p.active).sort((a, b) => a.created_at.localeCompare(b.created_at));
-  const other = data.categories.find((c) => c.is_system);
+  const expenseCats = data.categories.filter((c) => c.kind === 'expense');
+  const incomeCats = data.categories.filter((c) => c.kind === 'income');
 
-  const filtered = useMemo(
-    () =>
-      data.allTransactions
-        .filter((t) => monthOf(t.date) === month)
-        .filter((t) => who === 'all' || (who === 'shared' ? t.person_id === null : t.person_id === who))
-        .filter((t) => kind === 'all' || t.kind === kind)
-        .filter((t) => cat === 'all' || (t.kind === 'expense' && (t.category_id ?? other?.id) === cat))
-        .sort((a, b) => b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at)),
-    [data.allTransactions, month, who, kind, cat, other?.id],
-  );
+  const filtered = useMemo(() => {
+    const resolve = categoryResolver(data.categories);
+    const matchesCat = (t: Transaction) => {
+      if (cat === 'all') return true;
+      if (cat.startsWith('acc:')) return t.kind === 'saving' && t.savings_account_id === cat.slice(4);
+      if (t.kind === 'saving') return false;
+      return resolve(t.category_id, t.kind)?.id === cat;
+    };
+    return data.allTransactions
+      .filter((t) => monthOf(t.date) === month)
+      .filter((t) => who === 'all' || (who === 'shared' ? t.person_id === null : t.person_id === who))
+      .filter((t) => kind === 'all' || t.kind === kind)
+      .filter(matchesCat)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.created_at.localeCompare(a.created_at));
+  }, [data.allTransactions, data.categories, month, who, kind, cat]);
 
   const days = useMemo(() => {
     const groups: { date: string; items: Transaction[]; spent: number }[] = [];
@@ -56,8 +64,10 @@ export function History({ month, setMonth, params, onOpen }: Props) {
     return groups;
   }, [filtered]);
 
-  const spent = filtered.filter((t) => t.kind === 'expense').reduce((s, t) => s + t.amount_cents, 0);
-  const income = filtered.filter((t) => t.kind === 'income').reduce((s, t) => s + t.amount_cents, 0);
+  const total = (k: Transaction['kind']) => filtered.filter((t) => t.kind === k).reduce((s, t) => s + t.amount_cents, 0);
+  const spent = total('expense');
+  const income = total('income');
+  const saved = total('saving');
   const filtering = who !== 'all' || kind !== 'all' || cat !== 'all';
 
   return (
@@ -76,17 +86,40 @@ export function History({ month, setMonth, params, onOpen }: Props) {
         </div>
         <div className="filters-row">
           <select className="input input-sm" value={kind} onChange={(e) => setFilter('kind', e.target.value)}>
-            <option value="all">Expenses & income</option>
-            <option value="expense">Expenses only</option>
-            <option value="income">Income only</option>
+            <option value="all">All entries</option>
+            <option value="expense">Expenses</option>
+            <option value="income">Income</option>
+            <option value="saving">Savings</option>
           </select>
           <select className="input input-sm" value={cat} onChange={(e) => setFilter('cat', e.target.value)}>
-            <option value="all">All categories</option>
-            {data.categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.emoji} {c.name}
-              </option>
-            ))}
+            <option value="all">{kind === 'saving' ? 'All accounts' : 'All categories'}</option>
+            {(kind === 'all' || kind === 'expense') && (
+              <optgroup label="Expense categories">
+                {expenseCats.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.emoji} {c.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {(kind === 'all' || kind === 'income') && (
+              <optgroup label="Income categories">
+                {incomeCats.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.emoji} {c.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {(kind === 'all' || kind === 'saving') && data.savingsAccounts.length > 0 && (
+              <optgroup label="Savings accounts">
+                {data.savingsAccounts.map((a) => (
+                  <option key={a.id} value={`acc:${a.id}`}>
+                    {a.emoji} {a.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </div>
       </div>
@@ -104,6 +137,13 @@ export function History({ month, setMonth, params, onOpen }: Props) {
         <span>
           {spent > 0 && <b>−{formatMoney(spent)}</b>}
           {income > 0 && <b className="pos"> +{formatMoney(income)}</b>}
+          {saved !== 0 && (
+            <b className="save">
+              {' '}
+              🐷 {saved > 0 ? '+' : '−'}
+              {formatMoney(Math.abs(saved))}
+            </b>
+          )}
         </span>
       </div>
 

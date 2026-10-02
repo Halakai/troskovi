@@ -4,15 +4,17 @@ A shared monthly expense tracker for two people. It's an installable web app (PW
 
 ## Features
 
-- Add an expense or income: amount, category, who paid (a person or **Shared**), date (defaults to today), and an optional note
-- Shared and private categories. Deleting a category moves its expenses to **Other**.
-- Monthly limits per category. A limit change applies from the current month on, so older months keep their old limits.
-- Monthly items for rent, loans, subscriptions and salaries. Each one is added automatically on its day of the month. Until then it counts as *expected*, so a salary that arrives mid-month is already included in "left to spend".
-- Monthly report: total spent vs budget, money flow, who spent what, a fair split of shared costs, categories with limits, and fun stats
-- Yearly report: month-by-month chart, people, categories against their yearly limits, and highlights
-- History browsable by month, with filters for person, type and category
+- Add an expense, an income or a savings movement: amount, category (or savings account), who (a person or **Shared**), date (defaults to today, or to the 1st of the month you're looking at), and an optional note
+- Separate category lists for expenses and income. Each list has shared and private categories. Deleting a category moves its entries to **Other** / **Other income**.
+- Savings accounts (e.g. "Emergency fund", "Vacation"), each with an optional goal and a starting balance. Money put into savings doesn't count as spending, but it does lower "left to spend". Taking money out raises it again.
+- Monthly limits per expense category. A limit change applies from the current month on, so older months keep their old limits.
+- Monthly items for rent, loans, subscriptions, salaries and savings. Each one is added automatically on its day of the month. Until then it counts as *expected*, so a salary that arrives mid-month is already included in "left to spend".
+- Monthly report: total spent vs budget, money flow, who spent what, a fair split of shared costs, categories with limits, income by category, savings, and fun stats
+- Yearly report: month-by-month chart, people, expense and income categories, savings per account, and highlights
+- History browsable by month, with filters for person, type (expense / income / savings) and category or account
 - Roles: the **admin** creates accounts, can edit or delete anything, and can reset passwords. Other users can add entries and edit the ones they added, and they can change their own password.
-- Works offline: expenses added without a connection are queued and uploaded later
+- Works offline: entries added without a connection are queued and uploaded later
+- Updates itself: when a new version is deployed, the app switches to it the next time it's opened, without interrupting an entry in progress. Settings shows the version date.
 - Dark mode (automatic, or set manually)
 
 ## Stack
@@ -63,5 +65,5 @@ Sign in as `david` / `admin`, change the password (**Settings → Change my pass
 
 - Supabase Auth needs an e-mail address, so a username `ana` is stored as `ana@troskovi.invalid`. The `.invalid` domain can never receive mail. If you change it, change it in both `src/config.ts` and `public._email_for()`.
 - Free Supabase projects are paused after about a week with no activity. Daily use keeps the project awake.
-- Re-running `schema.sql` is safe: it updates functions and policies and doesn't touch your data.
+- Re-running `schema.sql` is safe, and it's also how you upgrade: it adds new tables and columns, updates functions and policies, and keeps your data (`npm run db:apply` does it from the terminal).
 - Number format: `LOCALE` in `src/config.ts` (`en-IE` → €1,234.56, `hr-HR` → 1.234,56 €).

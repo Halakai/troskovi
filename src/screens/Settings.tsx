@@ -3,6 +3,7 @@ import { useData } from '../data/DataProvider';
 import { errorMessage } from '../supabase';
 import type { ThemePref } from '../lib/theme';
 import { navigate } from '../lib/router';
+import { BUILD_TIME } from '../lib/pwa';
 import { useToast } from '../components/Toast';
 import { Avatar, ColorPicker, Field, Segmented, Sheet, TopBar } from '../components/ui';
 import { IconRight } from '../components/Icons';
@@ -20,7 +21,7 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
 
   return (
     <>
-      <TopBar title="Settings" />
+      <TopBar title="Settings" back="/" />
 
       <section className="card">
         <div className="person-row">
@@ -62,10 +63,16 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
         <h3>Shared setup</h3>
         <div className="menu">
           <button className="menu-item" onClick={() => navigate('/settings/categories')}>
-            🏷️ Categories & monthly limits <IconRight />
+            🏷️ Expense categories & monthly limits <IconRight />
+          </button>
+          <button className="menu-item" onClick={() => navigate('/settings/categories?kind=income')}>
+            💼 Income categories <IconRight />
           </button>
           <button className="menu-item" onClick={() => navigate('/settings/recurring')}>
-            🔁 Monthly items (rent, loan, salary…) <IconRight />
+            🔁 Monthly items (rent, loan, salary, savings…) <IconRight />
+          </button>
+          <button className="menu-item" onClick={() => navigate('/savings')}>
+            🐷 Savings accounts <IconRight />
           </button>
         </div>
       </section>
@@ -93,6 +100,12 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
         Android: open in Chrome → ⋮ → <i>Add to Home screen / Install app</i>.
         <div className="dim" style={{ marginTop: 8 }}>
           {data.live ? '🟢 Live – changes from others appear instantly' : '⚪ Not connected right now'}
+          {BUILD_TIME && (
+            <>
+              <br />
+              Version from {new Date(BUILD_TIME).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' })}
+            </>
+          )}
         </div>
       </section>
 

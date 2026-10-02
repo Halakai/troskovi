@@ -1,33 +1,48 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { errorMessage, isNetworkError, supabase } from '../supabase';
-import type { Category, CategoryLimit, Profile, Recurring, Transaction, TransactionInput } from '../types';
+import type { Category, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction, TransactionInput } from '../types';
 import { monthOf, monthStart, todayISO, yearOf } from '../lib/dates';
+import type { ReportInput } from '../lib/stats';
 import { uuid } from '../lib/uuid';
 
 interface Snapshot {
   profiles: Profile[];
   categories: Category[];
   limits: CategoryLimit[];
+  savingsAccounts: SavingsAccount[];
   recurring: Recurring[];
-  /** transactions of every year listed in `years` */
+  /** transactions of every year listed in `years`, plus all savings movements (needed for balances) */
   transactions: Transaction[];
   years: number[];
 }
 
-const EMPTY: Snapshot = { profiles: [], categories: [], limits: [], recurring: [], transactions: [], years: [] };
+const EMPTY: Snapshot = { profiles: [], categories: [], limits: [], savingsAccounts: [], recurring: [], transactions: [], years: [] };
 
-export type CategoryDraft = Pick<Category, 'name' | 'emoji' | 'color' | 'owner_id'> & { id?: string };
+export type CategoryDraft = Pick<Category, 'name' | 'emoji' | 'color' | 'owner_id' | 'kind'> & { id?: string };
+export type SavingsAccountDraft = Pick<
+  SavingsAccount,
+  'name' | 'emoji' | 'color' | 'owner_id' | 'goal_cents' | 'initial_cents' | 'archived'
+> & { id?: string };
 export type RecurringDraft = Pick<
   Recurring,
-  'kind' | 'name' | 'amount_cents' | 'category_id' | 'person_id' | 'day_of_month' | 'start_month' | 'end_month' | 'active'
+  | 'kind'
+  | 'name'
+  | 'amount_cents'
+  | 'category_id'
+  | 'savings_account_id'
+  | 'person_id'
+  | 'day_of_month'
+  | 'start_month'
+  | 'end_month'
+  | 'active'
 > & { id?: string };
 
 interface DataContextValue extends Snapshot {
   userId: string;
   me: Profile | undefined;
   isAdmin: boolean;
-  /** server data + expenses saved offline that are still waiting to upload */
+  /** server data + entries saved offline that are still waiting to upload */
   allTransactions: Transaction[];
   pendingCount: number;
   ready: boolean;
@@ -44,6 +59,9 @@ interface DataContextValue extends Snapshot {
   saveCategory: (draft: CategoryDraft) => Promise<Category>;
   deleteCategory: (id: string) => Promise<void>;
   setLimit: (categoryId: string, month: string, cents: number | null) => Promise<void>;
+
+  saveSavingsAccount: (draft: SavingsAccountDraft) => Promise<SavingsAccount>;
+  deleteSavingsAccount: (id: string) => Promise<void>;
 
   saveRecurring: (draft: RecurringDraft) => Promise<void>;
   deleteRecurring: (id: string) => Promise<void>;
@@ -63,9 +81,26 @@ export function useData(): DataContextValue {
   return ctx;
 }
 
+/** Everything the report functions in lib/stats need. */
+export function useReportInput(): ReportInput {
+  const d = useData();
+  return useMemo(
+    () => ({
+      transactions: d.allTransactions,
+      categories: d.categories,
+      limits: d.limits,
+      savingsAccounts: d.savingsAccounts,
+      recurring: d.recurring,
+      profiles: d.profiles,
+      today: todayISO(),
+    }),
+    [d.allTransactions, d.categories, d.limits, d.savingsAccounts, d.recurring, d.profiles],
+  );
+}
+
 // ---------------------------------------------------------------- helpers
 
-const cacheKey = (userId: string) => `troskovi.cache.v1.${userId}`;
+const cacheKey = (userId: string) => `troskovi.cache.v2.${userId}`;
 const outboxKey = (userId: string) => `troskovi.outbox.v1.${userId}`;
 
 function readJSON<T>(key: string, fallback: T): T {
@@ -86,11 +121,25 @@ function writeJSON(key: string, value: unknown) {
 }
 
 type Row = Record<string, unknown>;
-const normTx = (r: Row) => ({ ...r, amount_cents: Number(r.amount_cents) }) as Transaction;
-const normRecurring = (r: Row) => ({ ...r, amount_cents: Number(r.amount_cents), day_of_month: Number(r.day_of_month) }) as Recurring;
+const normTx = (r: Row) =>
+  ({ ...r, amount_cents: Number(r.amount_cents), savings_account_id: r.savings_account_id ?? null }) as Transaction;
+const normRecurring = (r: Row) =>
+  ({
+    ...r,
+    amount_cents: Number(r.amount_cents),
+    day_of_month: Number(r.day_of_month),
+    savings_account_id: r.savings_account_id ?? null,
+  }) as Recurring;
 const normLimit = (r: Row) => ({ ...r, amount_cents: r.amount_cents == null ? null : Number(r.amount_cents) }) as CategoryLimit;
-const normCategory = (r: Row) => ({ ...r, sort_order: Number(r.sort_order) }) as Category;
-const sortCategories = (list: Category[]) =>
+const normCategory = (r: Row) => ({ ...r, kind: r.kind ?? 'expense', sort_order: Number(r.sort_order) }) as Category;
+const normSavings = (r: Row) =>
+  ({
+    ...r,
+    goal_cents: r.goal_cents == null ? null : Number(r.goal_cents),
+    initial_cents: Number(r.initial_cents ?? 0),
+    sort_order: Number(r.sort_order),
+  }) as SavingsAccount;
+const bySortOrder = <T extends { sort_order: number; name: string }>(list: T[]) =>
   [...list].sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
 
 function upsertById<T extends { id: string }>(list: T[], item: T): T[] {
@@ -106,19 +155,18 @@ const sameLimit = (a: CategoryLimit, b: Pick<CategoryLimit, 'category_id' | 'eff
 
 /** Only the real table columns (no client-only fields). */
 function txRow(t: Transaction) {
-  const { id, kind, amount_cents, category_id, person_id, date, note, recurring_id, created_by } = t;
-  return { id, kind, amount_cents, category_id, person_id, date, note, recurring_id, created_by };
+  const { id, kind, amount_cents, category_id, savings_account_id, person_id, date, note, recurring_id, created_by } = t;
+  return { id, kind, amount_cents, category_id, savings_account_id, person_id, date, note, recurring_id, created_by };
 }
 
-async function fetchYear(year: number): Promise<Transaction[]> {
+/** One year of entries, or (`savings`) every savings movement ever – balances need the full history. */
+async function fetchTransactions(where: { year: number } | { savings: true }): Promise<Transaction[]> {
   const PAGE = 1000;
   const rows: Transaction[] = [];
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await supabase
-      .from('transactions')
-      .select('*')
-      .gte('date', `${year}-01-01`)
-      .lte('date', `${year}-12-31`)
+    let q = supabase.from('transactions').select('*');
+    q = 'year' in where ? q.gte('date', `${where.year}-01-01`).lte('date', `${where.year}-12-31`) : q.eq('kind', 'saving');
+    const { data, error } = await q
       .order('date')
       .order('id')
       .range(from, from + PAGE - 1);
@@ -128,6 +176,9 @@ async function fetchYear(year: number): Promise<Transaction[]> {
   }
 }
 
+const fetchYear = (year: number) => fetchTransactions({ year });
+const fetchSavingsMovements = () => fetchTransactions({ savings: true });
+
 async function fetchTable<T>(table: string, norm: (r: Row) => T): Promise<T[]> {
   const { data, error } = await supabase.from(table).select('*');
   if (error) throw error;
@@ -135,15 +186,26 @@ async function fetchTable<T>(table: string, norm: (r: Row) => T): Promise<T[]> {
 }
 
 function hydrate(userId: string): Snapshot {
-  const cached = readJSON<Snapshot>(cacheKey(userId), EMPTY);
+  try {
+    localStorage.removeItem(`troskovi.cache.v1.${userId}`); // older cache format
+  } catch {
+    /* ignore */
+  }
+  const cached = readJSON<Partial<Snapshot>>(cacheKey(userId), {});
   // keep the start-up refresh small: only this year and last year come from cache
   const thisYear = new Date().getFullYear();
   const years = (cached.years ?? []).filter((y) => y >= thisYear - 1);
   return {
     ...EMPTY,
-    ...cached,
+    profiles: cached.profiles ?? [],
+    categories: (cached.categories ?? []).map((c) => normCategory(c as unknown as Row)),
+    limits: cached.limits ?? [],
+    savingsAccounts: (cached.savingsAccounts ?? []).map((a) => normSavings(a as unknown as Row)),
+    recurring: (cached.recurring ?? []).map((r) => normRecurring(r as unknown as Row)),
     years,
-    transactions: (cached.transactions ?? []).filter((t) => years.includes(yearOf(t.date))),
+    transactions: (cached.transactions ?? [])
+      .map((t) => normTx(t as unknown as Row))
+      .filter((t) => t.kind === 'saving' || years.includes(yearOf(t.date))),
   };
 }
 
@@ -151,7 +213,9 @@ function hydrate(userId: string): Snapshot {
 
 export function DataProvider({ userId, children }: { userId: string; children: ReactNode }) {
   const [snap, setSnap] = useState<Snapshot>(() => hydrate(userId));
-  const [outbox, setOutbox] = useState<Transaction[]>(() => readJSON<Transaction[]>(outboxKey(userId), []));
+  const [outbox, setOutbox] = useState<Transaction[]>(() =>
+    readJSON<Transaction[]>(outboxKey(userId), []).map((t) => normTx(t as unknown as Row)),
+  );
   const [ready, setReady] = useState(() => snap.profiles.length > 0);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
@@ -180,17 +244,19 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     setSnap((s) => ({ ...s, transactions: s.transactions.filter((t) => t.id !== id) }));
   }, []);
 
-  const replaceYear = (s: Snapshot, year: number, rows: Transaction[], since: number): Snapshot => {
-    const prefix = `${year}-`;
-    const kept = s.transactions.filter((t) => !t.date.startsWith(prefix) || isNewer(t.id, since));
+  /** Replaces the loaded transactions matching `belongs` with fresh rows from the server. */
+  const replaceWhere = (s: Snapshot, belongs: (t: Transaction) => boolean, rows: Transaction[], since: number) => {
+    const kept = s.transactions.filter((t) => !belongs(t) || isNewer(t.id, since));
     const keptIds = new Set(kept.map((t) => t.id));
     const fresh = rows.filter((r) => !isNewer(r.id, since) && !keptIds.has(r.id));
-    return {
-      ...s,
-      transactions: [...kept, ...fresh],
-      years: s.years.includes(year) ? s.years : [...s.years, year],
-    };
+    return [...kept, ...fresh];
   };
+
+  const replaceYear = (s: Snapshot, year: number, rows: Transaction[], since: number): Snapshot => ({
+    ...s,
+    transactions: replaceWhere(s, (t) => t.date.startsWith(`${year}-`), rows, since),
+    years: s.years.includes(year) ? s.years : [...s.years, year],
+  });
 
   // ---- persistence
 
@@ -213,7 +279,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
         if (error && isNetworkError(error)) return;
         setOutbox((o) => o.filter((x) => x.id !== tx.id));
         if (error) {
-          setSyncError(`An expense saved offline could not be uploaded: ${errorMessage(error)}`);
+          setSyncError(`An entry saved offline could not be uploaded: ${errorMessage(error)}`);
         } else {
           putTx({ ...tx, pending: undefined });
         }
@@ -237,19 +303,29 @@ export function DataProvider({ userId, children }: { userId: string; children: R
         const rec = await supabase.rpc('apply_recurring', { p_today: todayISO() });
         if (rec.error && isNetworkError(rec.error)) throw rec.error;
 
-        const [profiles, categories, limits, recurring] = await Promise.all([
+        const [profiles, categories, limits, savingsAccounts, recurring, savingsMovements] = await Promise.all([
           fetchTable('profiles', (r) => r as unknown as Profile),
           fetchTable('categories', normCategory),
           fetchTable('category_limits', normLimit),
+          fetchTable('savings_accounts', normSavings),
           fetchTable('recurring', normRecurring),
+          fetchSavingsMovements(),
         ]);
         const thisYear = new Date().getFullYear();
         const years = [...new Set([thisYear, ...snapRef.current.years])];
         const perYear = await Promise.all(years.map(fetchYear));
 
         setSnap((s) => {
-          let next: Snapshot = { ...s, profiles, categories: sortCategories(categories), limits, recurring };
+          let next: Snapshot = {
+            ...s,
+            profiles,
+            categories: bySortOrder(categories),
+            limits,
+            savingsAccounts: bySortOrder(savingsAccounts),
+            recurring,
+          };
           years.forEach((y, i) => (next = replaceYear(next, y, perYear[i], since)));
+          next = { ...next, transactions: replaceWhere(next, (t) => t.kind === 'saving', savingsMovements, since) };
           return next;
         });
         setReady(true);
@@ -293,7 +369,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
       }
     };
     const byId =
-      <K extends 'profiles' | 'categories' | 'recurring'>(key: K, norm: (r: Row) => Snapshot[K][number]) =>
+      <K extends 'profiles' | 'categories' | 'savingsAccounts' | 'recurring'>(key: K, norm: (r: Row) => Snapshot[K][number]) =>
       (p: RealtimePostgresChangesPayload<Row>) =>
         setSnap((s) => {
           const list = s[key] as Array<{ id: string }>;
@@ -301,7 +377,8 @@ export function DataProvider({ userId, children }: { userId: string; children: R
             p.eventType === 'DELETE'
               ? list.filter((x) => x.id !== p.old.id)
               : upsertById(list, norm(p.new) as unknown as { id: string });
-          return { ...s, [key]: key === 'categories' ? sortCategories(next as Category[]) : next };
+          const sorted = key === 'categories' || key === 'savingsAccounts' ? bySortOrder(next as Category[]) : next;
+          return { ...s, [key]: sorted };
         });
     const onLimit = (p: RealtimePostgresChangesPayload<Row>) =>
       setSnap((s) => {
@@ -315,6 +392,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
       .channel(`troskovi-${userId}`)
       .on('postgres_changes', { ...changes, table: 'transactions' }, onTx)
       .on('postgres_changes', { ...changes, table: 'categories' }, byId('categories', normCategory))
+      .on('postgres_changes', { ...changes, table: 'savings_accounts' }, byId('savingsAccounts', normSavings))
       .on('postgres_changes', { ...changes, table: 'recurring' }, byId('recurring', normRecurring))
       .on('postgres_changes', { ...changes, table: 'profiles' }, byId('profiles', (r) => r as unknown as Profile))
       .on('postgres_changes', { ...changes, table: 'category_limits' }, onLimit)
@@ -352,7 +430,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
       let recurringId: string | null = null;
 
       if (opts.repeatMonthly) {
-        // Starts in the month of this expense and counts this one as already posted,
+        // Starts in the month of this entry and counts this one as already posted,
         // so the next copy is created automatically next month.
         const month = monthStart(monthOf(input.date));
         const { data, error } = await supabase
@@ -362,6 +440,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
             name: opts.recurringName || input.note || 'Monthly',
             amount_cents: input.amount_cents,
             category_id: input.category_id,
+            savings_account_id: input.savings_account_id,
             person_id: input.person_id,
             day_of_month: Number(input.date.slice(8, 10)),
             start_month: month,
@@ -440,16 +519,17 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     const { data, error } = await q;
     if (error || !data?.length) throw new Error(error ? errorMessage(error) : "You can't edit this category");
     const saved = normCategory(data[0]);
-    setSnap((s) => ({ ...s, categories: sortCategories(upsertById(s.categories, saved)) }));
+    setSnap((s) => ({ ...s, categories: bySortOrder(upsertById(s.categories, saved)) }));
     return saved;
   }, []);
 
   const deleteCategory = useCallback<DataContextValue['deleteCategory']>(async (id) => {
     const { data, error } = await supabase.from('categories').delete().eq('id', id).select('id');
     if (error || !data?.length) throw new Error(error ? errorMessage(error) : "You can't delete this category");
-    // the database moves its expenses to "Other"; mirror that locally right away
+    // the database moves its entries to "Other" / "Other income"; mirror that locally right away
     setSnap((s) => {
-      const other = s.categories.find((c) => c.is_system)?.id ?? null;
+      const kind = s.categories.find((c) => c.id === id)?.kind ?? 'expense';
+      const other = s.categories.find((c) => c.is_system && c.kind === kind)?.id ?? null;
       return {
         ...s,
         categories: s.categories.filter((c) => c.id !== id),
@@ -471,6 +551,30 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     setSnap((s) => ({
       ...s,
       limits: [...s.limits.filter((l) => l.category_id !== categoryId || l.effective_from < from), row],
+    }));
+  }, []);
+
+  const saveSavingsAccount = useCallback<DataContextValue['saveSavingsAccount']>(async ({ id, ...fields }) => {
+    const q = id
+      ? supabase.from('savings_accounts').update(fields).eq('id', id).select()
+      : supabase.from('savings_accounts').insert(fields).select();
+    const { data, error } = await q;
+    if (error || !data?.length) throw new Error(error ? errorMessage(error) : "You can't edit this account");
+    const saved = normSavings(data[0]);
+    setSnap((s) => ({ ...s, savingsAccounts: bySortOrder(upsertById(s.savingsAccounts, saved)) }));
+    return saved;
+  }, []);
+
+  const deleteSavingsAccount = useCallback<DataContextValue['deleteSavingsAccount']>(async (id) => {
+    const { data, error } = await supabase.from('savings_accounts').delete().eq('id', id).select('id');
+    if (error?.code === '23001' || error?.code === '23503') {
+      throw new Error('This account already has entries – archive it instead');
+    }
+    if (error || !data?.length) throw new Error(error ? errorMessage(error) : "You can't delete this account");
+    setSnap((s) => ({
+      ...s,
+      savingsAccounts: s.savingsAccounts.filter((a) => a.id !== id),
+      recurring: s.recurring.filter((r) => r.savings_account_id !== id),
     }));
   }, []);
 
@@ -579,6 +683,8 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     saveCategory,
     deleteCategory,
     setLimit,
+    saveSavingsAccount,
+    deleteSavingsAccount,
     saveRecurring,
     deleteRecurring,
     changeMyPassword,

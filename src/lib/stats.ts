@@ -1,11 +1,12 @@
 // Pure report calculations (no React, no network) – easy to test.
-import type { Category, CategoryLimit, Profile, Recurring, Transaction } from '../types';
+import type { Category, CategoryKind, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction } from '../types';
 import { addMonths, daysInMonth, monthOf, monthsOfYear, monthStart, parseISODate, recurringDate } from './dates';
 
 export interface ReportInput {
   transactions: Transaction[];
   categories: Category[];
   limits: CategoryLimit[];
+  savingsAccounts: SavingsAccount[];
   recurring: Recurring[];
   profiles: Profile[];
   /** local YYYY-MM-DD */
@@ -14,9 +15,10 @@ export interface ReportInput {
 
 export interface CategoryStat {
   category: Category;
+  /** money spent (expense list) or received (income list) */
   spent: number;
   count: number;
-  /** null = no limit set */
+  /** null = no limit set (always null for income) */
   limit: number | null;
 }
 
@@ -27,6 +29,8 @@ export interface PersonStat {
   color: string;
   spent: number;
   income: number;
+  /** net money put into savings */
+  saved: number;
   count: number;
   /** own spending + an equal part of shared spending (0 for the shared row) */
   fairShare: number;
@@ -37,9 +41,16 @@ export interface UpcomingItem {
   date: string;
 }
 
+export interface AccountNet {
+  account: SavingsAccount;
+  /** deposits − withdrawals in the period */
+  net: number;
+}
+
 export const SHARED_COLOR = '#94a3b8';
 
 const sum = (txs: Transaction[]) => txs.reduce((s, t) => s + t.amount_cents, 0);
+const ofKind = (txs: Transaction[], kind: Transaction['kind']) => txs.filter((t) => t.kind === kind);
 
 export function limitFor(limits: CategoryLimit[], categoryId: string, month: string): number | null {
   const start = monthStart(month);
@@ -76,58 +87,60 @@ export function upcomingRecurring(recurring: Recurring[], month: string, today: 
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
-function categoryResolver(categories: Category[]) {
+/** Finds an entry's category; unknown or missing ones count as "Other" / "Other income". */
+export function categoryResolver(categories: Category[]) {
   const byId = new Map(categories.map((c) => [c.id, c]));
-  const other = categories.find((c) => c.is_system);
-  return (id: string | null) => (id && byId.get(id)) || other;
+  const other: Record<CategoryKind, Category | undefined> = {
+    expense: categories.find((c) => c.is_system && c.kind === 'expense'),
+    income: categories.find((c) => c.is_system && c.kind === 'income'),
+  };
+  return (id: string | null, kind: CategoryKind): Category | undefined => {
+    const c = id ? byId.get(id) : undefined;
+    return c && c.kind === kind ? c : other[kind];
+  };
 }
 
 function personStats(profiles: Profile[], txs: Transaction[]): PersonStat[] {
   const people = members(profiles, txs);
-  const expenses = txs.filter((t) => t.kind === 'expense');
+  const expenses = ofKind(txs, 'expense');
   const shared = sum(expenses.filter((t) => t.person_id === null));
   const share = people.length ? shared / people.length : 0;
-  const rows: PersonStat[] = people.map((p) => {
-    const own = txs.filter((t) => t.person_id === p.id);
-    const spent = sum(own.filter((t) => t.kind === 'expense'));
+  const row = (id: string | null, name: string, color: string): PersonStat => {
+    const own = txs.filter((t) => t.person_id === id);
+    const spent = sum(ofKind(own, 'expense'));
     return {
-      id: p.id,
-      name: p.display_name,
-      color: p.color,
+      id,
+      name,
+      color,
       spent,
-      income: sum(own.filter((t) => t.kind === 'income')),
-      count: own.filter((t) => t.kind === 'expense').length,
-      fairShare: Math.round(spent + share),
+      income: sum(ofKind(own, 'income')),
+      saved: sum(ofKind(own, 'saving')),
+      count: ofKind(own, 'expense').length,
+      fairShare: id === null ? 0 : Math.round(spent + share),
     };
-  });
-  const sharedTx = txs.filter((t) => t.person_id === null);
-  rows.push({
-    id: null,
-    name: 'Shared',
-    color: SHARED_COLOR,
-    spent: shared,
-    income: sum(sharedTx.filter((t) => t.kind === 'income')),
-    count: sharedTx.filter((t) => t.kind === 'expense').length,
-    fairShare: 0,
-  });
-  return rows;
+  };
+  return [...people.map((p) => row(p.id, p.display_name, p.color)), row(null, 'Shared', SHARED_COLOR)];
 }
 
-function categoryStats(input: ReportInput, expenses: Transaction[], months: string[]): CategoryStat[] {
+/** Per category of one list (expense or income). Limits are added up over `months` (expense list only). */
+function categoryStats(input: ReportInput, txs: Transaction[], months: string[], kind: CategoryKind): CategoryStat[] {
   const resolve = categoryResolver(input.categories);
   const map = new Map<string, CategoryStat>();
   for (const c of input.categories) {
+    if (c.kind !== kind) continue;
     let limit: number | null = null;
-    for (const m of months) {
-      const l = limitFor(input.limits, c.id, m);
-      if (l !== null) limit = (limit ?? 0) + l;
+    if (kind === 'expense') {
+      for (const m of months) {
+        const l = limitFor(input.limits, c.id, m);
+        if (l !== null) limit = (limit ?? 0) + l;
+      }
     }
     map.set(c.id, { category: c, spent: 0, count: 0, limit });
   }
-  for (const t of expenses) {
-    const c = resolve(t.category_id);
-    if (!c) continue;
-    const s = map.get(c.id)!;
+  for (const t of ofKind(txs, kind)) {
+    const c = resolve(t.category_id, kind);
+    const s = c && map.get(c.id);
+    if (!s) continue;
     s.spent += t.amount_cents;
     s.count += 1;
   }
@@ -136,19 +149,33 @@ function categoryStats(input: ReportInput, expenses: Transaction[], months: stri
     .sort((a, b) => b.spent - a.spent || (b.limit ?? 0) - (a.limit ?? 0));
 }
 
+/** Net savings per account in the given transactions (accounts without movement are left out). */
+function accountNets(accounts: SavingsAccount[], txs: Transaction[]): AccountNet[] {
+  const saving = ofKind(txs, 'saving');
+  return accounts
+    .map((account) => ({ account, net: sum(saving.filter((t) => t.savings_account_id === account.id)) }))
+    .filter((a) => a.net !== 0)
+    .sort((a, b) => b.net - a.net);
+}
+
 export interface MonthReport {
   month: string;
   transactions: Transaction[];
   spent: number;
   income: number;
+  /** net money moved into savings (deposits − withdrawals) */
+  saved: number;
   categories: CategoryStat[];
+  incomeCategories: CategoryStat[];
+  savings: AccountNet[];
   /** sum of limits / spending in categories that have a limit */
   budget: { limit: number; spent: number } | null;
   people: PersonStat[];
   upcoming: UpcomingItem[];
   upcomingExpenses: number;
+  upcomingSavings: number;
   expectedIncome: number;
-  /** income (received + expected) − spent − upcoming bills */
+  /** income (received + expected) − spent − upcoming bills − savings (made + planned) */
   leftToSpend: number;
   isCurrent: boolean;
   daysElapsed: number;
@@ -166,10 +193,11 @@ export interface MonthReport {
 
 export function monthReport(input: ReportInput, month: string): MonthReport {
   const txs = input.transactions.filter((t) => monthOf(t.date) === month);
-  const expenses = txs.filter((t) => t.kind === 'expense');
+  const expenses = ofKind(txs, 'expense');
   const spent = sum(expenses);
-  const income = sum(txs.filter((t) => t.kind === 'income'));
-  const categories = categoryStats(input, expenses, [month]);
+  const income = sum(ofKind(txs, 'income'));
+  const saved = sum(ofKind(txs, 'saving'));
+  const categories = categoryStats(input, txs, [month], 'expense');
 
   const limited = categories.filter((c) => c.limit !== null);
   const budget = limited.length
@@ -177,8 +205,11 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
     : null;
 
   const upcoming = upcomingRecurring(input.recurring, month, input.today);
-  const upcomingExpenses = upcoming.filter((u) => u.item.kind === 'expense').reduce((s, u) => s + u.item.amount_cents, 0);
-  const expectedIncome = upcoming.filter((u) => u.item.kind === 'income').reduce((s, u) => s + u.item.amount_cents, 0);
+  const upcomingOf = (kind: Recurring['kind']) =>
+    upcoming.filter((u) => u.item.kind === kind).reduce((s, u) => s + u.item.amount_cents, 0);
+  const upcomingExpenses = upcomingOf('expense');
+  const upcomingSavings = upcomingOf('saving');
+  const expectedIncome = upcomingOf('income');
 
   const todayMonth = monthOf(input.today);
   const isCurrent = month === todayMonth;
@@ -212,13 +243,17 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
     transactions: txs,
     spent,
     income,
+    saved,
     categories,
+    incomeCategories: categoryStats(input, txs, [month], 'income'),
+    savings: accountNets(input.savingsAccounts, txs),
     budget,
     people: personStats(input.profiles, txs),
     upcoming,
     upcomingExpenses,
+    upcomingSavings,
     expectedIncome,
-    leftToSpend: income + expectedIncome - spent - upcomingExpenses,
+    leftToSpend: income + expectedIncome - spent - upcomingExpenses - saved - upcomingSavings,
     isCurrent,
     daysElapsed,
     daysInMonth: dim,
@@ -236,6 +271,7 @@ export interface MonthTotal {
   month: string;
   spent: number;
   income: number;
+  saved: number;
 }
 
 export interface YearReport {
@@ -243,8 +279,13 @@ export interface YearReport {
   months: MonthTotal[];
   spent: number;
   income: number;
+  /** net money moved into savings */
   saved: number;
+  /** income − spent − saved: money that was neither spent nor put aside */
+  leftOver: number;
   categories: CategoryStat[];
+  incomeCategories: CategoryStat[];
+  savings: AccountNet[];
   people: PersonStat[];
   /** months that already started (all 12 for past years) */
   elapsedMonths: number;
@@ -261,22 +302,18 @@ export function yearReport(input: ReportInput, year: number): YearReport {
   const todayMonth = monthOf(input.today);
   const elapsed = months.filter((m) => m <= todayMonth);
   const txs = input.transactions.filter((t) => t.date.startsWith(`${year}-`));
-  const expenses = txs.filter((t) => t.kind === 'expense');
+  const expenses = ofKind(txs, 'expense');
 
   const totals: MonthTotal[] = months.map((month) => {
     const mt = txs.filter((t) => monthOf(t.date) === month);
-    return {
-      month,
-      spent: sum(mt.filter((t) => t.kind === 'expense')),
-      income: sum(mt.filter((t) => t.kind === 'income')),
-    };
+    return { month, spent: sum(ofKind(mt, 'expense')), income: sum(ofKind(mt, 'income')), saved: sum(ofKind(mt, 'saving')) };
   });
   const spent = sum(expenses);
-  const income = sum(txs.filter((t) => t.kind === 'income'));
+  const income = sum(ofKind(txs, 'income'));
+  const saved = sum(ofKind(txs, 'saving'));
   const withSpending = totals.filter((m) => m.spent > 0);
   const variable = expenses.filter((t) => !t.recurring_id);
 
-  const people = personStats(input.profiles, txs);
   const monthsWon = new Map<string, number>();
   for (const month of months) {
     const mt = expenses.filter((t) => monthOf(t.date) === month && t.person_id);
@@ -292,9 +329,12 @@ export function yearReport(input: ReportInput, year: number): YearReport {
     months: totals,
     spent,
     income,
-    saved: income - spent,
-    categories: categoryStats(input, expenses, elapsed),
-    people,
+    saved,
+    leftOver: income - spent - saved,
+    categories: categoryStats(input, txs, elapsed, 'expense'),
+    incomeCategories: categoryStats(input, txs, elapsed, 'income'),
+    savings: accountNets(input.savingsAccounts, txs),
+    people: personStats(input.profiles, txs),
     elapsedMonths: elapsed.length,
     averagePerMonth: elapsed.length ? Math.round(spent / elapsed.length) : 0,
     priciest: withSpending.reduce<MonthTotal | null>((b, m) => (!b || m.spent > b.spent ? m : b), null),
@@ -305,5 +345,66 @@ export function yearReport(input: ReportInput, year: number): YearReport {
       null,
     ),
     monthsWon,
+  };
+}
+
+export interface AccountStat {
+  account: SavingsAccount;
+  /** starting balance + every deposit − every withdrawal */
+  balance: number;
+  deposited: number;
+  /** positive number */
+  withdrawn: number;
+  thisMonth: number;
+  thisYear: number;
+  /** all-time net contributions per person (null = shared) */
+  byPerson: { id: string | null; net: number }[];
+}
+
+export interface SavingsReport {
+  /** open accounts first, then archived ones */
+  accounts: AccountStat[];
+  total: number;
+  thisMonth: number;
+  thisYear: number;
+  /** net savings per month of the current year */
+  months: { month: string; net: number }[];
+  /** all-time net contributions (null = shared) */
+  people: { id: string | null; net: number }[];
+}
+
+/** Needs every savings movement ever (not just the loaded years) for correct balances. */
+export function savingsReport(input: ReportInput): SavingsReport {
+  const all = ofKind(input.transactions, 'saving');
+  const month = monthOf(input.today);
+  const year = input.today.slice(0, 4);
+  const perPerson = (txs: Transaction[]) => {
+    const map = new Map<string | null, number>();
+    for (const t of txs) map.set(t.person_id, (map.get(t.person_id) ?? 0) + t.amount_cents);
+    return [...map].map(([id, net]) => ({ id, net })).sort((a, b) => b.net - a.net);
+  };
+
+  const accounts = input.savingsAccounts
+    .map((account): AccountStat => {
+      const own = all.filter((t) => t.savings_account_id === account.id);
+      return {
+        account,
+        balance: account.initial_cents + sum(own),
+        deposited: sum(own.filter((t) => t.amount_cents > 0)),
+        withdrawn: -sum(own.filter((t) => t.amount_cents < 0)),
+        thisMonth: sum(own.filter((t) => monthOf(t.date) === month)),
+        thisYear: sum(own.filter((t) => t.date.startsWith(`${year}-`))),
+        byPerson: perPerson(own),
+      };
+    })
+    .sort((a, b) => Number(a.account.archived) - Number(b.account.archived));
+
+  return {
+    accounts,
+    total: accounts.reduce((s, a) => s + a.balance, 0),
+    thisMonth: sum(all.filter((t) => monthOf(t.date) === month)),
+    thisYear: sum(all.filter((t) => t.date.startsWith(`${year}-`))),
+    months: monthsOfYear(Number(year)).map((m) => ({ month: m, net: sum(all.filter((t) => monthOf(t.date) === m)) })),
+    people: perPerson(all),
   };
 }
