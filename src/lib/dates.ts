@@ -28,6 +28,17 @@ export function monthStart(month: string): string {
   return `${month}-01`;
 }
 
+/** Date a new entry starts with while looking at `month`: today in the current month, otherwise the 1st. */
+export function defaultDateFor(month: string, today = todayISO()): string {
+  return monthOf(today) === month ? today : monthStart(month);
+}
+
+/** "2026-10-02" → "02/10/2026" */
+export function formatDMY(iso: string): string {
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y}`;
+}
+
 export function addMonths(month: string, n: number): string {
   const [y, m] = month.split('-').map(Number);
   const d = new Date(y, m - 1 + n, 1);

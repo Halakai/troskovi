@@ -5,10 +5,17 @@ import type { Kind, Transaction, TransactionInput } from '../types';
 import { centsToInput, parseAmount } from '../lib/money';
 import { formatDay, ordinal, todayISO } from '../lib/dates';
 import { useToast } from './Toast';
-import { Field, Segmented, Sheet, Toggle, useLookups } from './ui';
+import { DateInput, Field, Segmented, Sheet, Toggle, useLookups } from './ui';
 import { IconLock } from './Icons';
 
-export function TxSheet({ tx, onClose }: { tx: Transaction | null; onClose: () => void }) {
+interface Props {
+  tx: Transaction | null;
+  /** for new entries; defaults to today */
+  defaultDate?: string;
+  onClose: () => void;
+}
+
+export function TxSheet({ tx, defaultDate, onClose }: Props) {
   const data = useData();
   const toast = useToast();
   const { category, personName, personColor } = useLookups();
@@ -21,7 +28,7 @@ export function TxSheet({ tx, onClose }: { tx: Transaction | null; onClose: () =
   const [amount, setAmount] = useState(tx ? centsToInput(tx.amount_cents) : '');
   const [categoryId, setCategoryId] = useState<string | null>(tx?.category_id ?? null);
   const [person, setPerson] = useState<string>(tx ? (tx.person_id ?? 'shared') : data.userId);
-  const [date, setDate] = useState(tx?.date ?? todayISO());
+  const [date, setDate] = useState(tx?.date ?? defaultDate ?? todayISO());
   const [note, setNote] = useState(tx?.note ?? '');
   const [repeat, setRepeat] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -36,6 +43,7 @@ export function TxSheet({ tx, onClose }: { tx: Transaction | null; onClose: () =
     .sort((a, b) => a.created_at.localeCompare(b.created_at));
   const amountError = showErrors && cents === null;
   const categoryError = showErrors && kind === 'expense' && !categoryId;
+  const dateError = showErrors && !date;
 
   async function save() {
     if (cents === null || (kind === 'expense' && !categoryId) || !date) {
@@ -156,8 +164,8 @@ export function TxSheet({ tx, onClose }: { tx: Transaction | null; onClose: () =
           </div>
 
           <div className="row-2">
-            <Field label="Date">
-              <input type="date" className="input" value={date} onChange={(e) => setDate(e.target.value)} required />
+            <Field label="Date" hint={dateError ? <span className="text-danger">Pick a date</span> : undefined}>
+              <DateInput value={date} onChange={setDate} />
             </Field>
             <Field label="Note (optional)">
               <input

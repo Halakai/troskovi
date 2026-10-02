@@ -1,11 +1,11 @@
 import { useEffect, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useData } from '../data/DataProvider';
-import { addMonths, currentMonth, formatMonth } from '../lib/dates';
+import { addMonths, currentMonth, formatDMY, formatMonth } from '../lib/dates';
 import { navigate } from '../lib/router';
 import { SHARED_COLOR } from '../lib/stats';
 import type { Category } from '../types';
-import { IconBack, IconClose, IconCloudOff, IconLeft, IconRight } from './Icons';
+import { IconBack, IconCalendar, IconClose, IconCloudOff, IconLeft, IconRight } from './Icons';
 
 // ---------------------------------------------------------------- lookups
 
@@ -227,6 +227,36 @@ export function Field({ label, hint, children }: { label: string; hint?: ReactNo
       {children}
       {hint && <span className="field-hint">{hint}</span>}
     </label>
+  );
+}
+
+/**
+ * Date field that always reads dd/mm/yyyy. Phones render <input type="date"> in the
+ * phone's region format (often mm/dd/yyyy), so the real input sits invisibly on top of
+ * our own text: tapping it still opens the phone's native calendar.
+ */
+export function DateInput({ value, onChange }: { value: string; onChange: (iso: string) => void }) {
+  return (
+    <span className="input date-input">
+      <span className={value ? '' : 'dim'}>{value ? formatDMY(value) : 'dd/mm/yyyy'}</span>
+      <IconCalendar />
+      <input
+        type="date"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onClick={(e) => {
+          // computers only open the calendar from its small icon; phones open it on any tap
+          if (window.matchMedia('(pointer: fine)').matches) {
+            try {
+              e.currentTarget.showPicker();
+            } catch {
+              /* not supported or already open */
+            }
+          }
+        }}
+        aria-label="Date"
+      />
+    </span>
   );
 }
 

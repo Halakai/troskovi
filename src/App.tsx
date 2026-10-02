@@ -4,7 +4,7 @@ import { isConfigured, supabase } from './supabase';
 import { DataProvider, useData } from './data/DataProvider';
 import { useTheme, type ThemePref } from './lib/theme';
 import { navigate, useRoute } from './lib/router';
-import { currentMonth, yearOf } from './lib/dates';
+import { currentMonth, defaultDateFor, todayISO, yearOf } from './lib/dates';
 import type { Transaction } from './types';
 import { ToastProvider } from './components/Toast';
 import { TxSheet } from './components/TxSheet';
@@ -79,7 +79,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
   const [path, params] = useRoute();
   const [month, setMonth] = useState(currentMonth);
   const [year, setYear] = useState(() => new Date().getFullYear());
-  const [sheet, setSheet] = useState<{ tx: Transaction | null } | null>(null);
+  const [sheet, setSheet] = useState<{ tx: Transaction | null; date?: string } | null>(null);
 
   if (!data.ready) {
     return data.syncError ? (
@@ -94,8 +94,11 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
 
   const open = (tx: Transaction) => setSheet({ tx });
   let screen;
+  // screens with the month selector: new entries start in the month being viewed
+  let showsMonth = false;
   switch (path) {
     case '/history':
+      showsMonth = true;
       screen = <History month={month} setMonth={setMonth} params={params} onOpen={open} />;
       break;
     case '/year':
@@ -123,6 +126,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
       screen = <UsersSettings />;
       break;
     default:
+      showsMonth = true;
       screen = (
         <Overview
           month={month}
@@ -148,13 +152,17 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
       <nav className="tabbar">
         {tab('/', 'Month', <IconHome />, path === '/')}
         {tab('/history', 'History', <IconList />, path === '/history')}
-        <button className="fab" onClick={() => setSheet({ tx: null })} aria-label="Add expense">
+        <button
+          className="fab"
+          onClick={() => setSheet({ tx: null, date: showsMonth ? defaultDateFor(month) : todayISO() })}
+          aria-label="Add expense"
+        >
           <IconPlus width={28} height={28} />
         </button>
         {tab('/year', 'Year', <IconChart />, path === '/year')}
         {tab('/settings', 'Settings', <IconGear />, path.startsWith('/settings'))}
       </nav>
-      {sheet && <TxSheet tx={sheet.tx} onClose={() => setSheet(null)} />}
+      {sheet && <TxSheet tx={sheet.tx} defaultDate={sheet.date} onClose={() => setSheet(null)} />}
     </div>
   );
 }
