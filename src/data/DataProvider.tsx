@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { RealtimePostgresChangesPayload } from '@supabase/supabase-js';
 import { errorMessage, isNetworkError, supabase } from '../supabase';
-import type { Category, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction, TransactionInput } from '../types';
+import type { AppSettings, Category, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction, TransactionInput } from '../types';
 import { monthOf, monthStart, todayISO, yearOf } from '../lib/dates';
 import type { ReportInput } from '../lib/stats';
 import { uuid } from '../lib/uuid';
@@ -12,14 +12,26 @@ interface Snapshot {
   limits: CategoryLimit[];
   savingsAccounts: SavingsAccount[];
   recurring: Recurring[];
+  settings: AppSettings;
   /** transactions of every year listed in `years`, plus all savings movements (needed for balances) */
   transactions: Transaction[];
   years: number[];
 }
 
-const EMPTY: Snapshot = { profiles: [], categories: [], limits: [], savingsAccounts: [], recurring: [], transactions: [], years: [] };
+const EMPTY: Snapshot = {
+  profiles: [],
+  categories: [],
+  limits: [],
+  savingsAccounts: [],
+  recurring: [],
+  settings: { carry_from: null },
+  transactions: [],
+  years: [],
+};
 
-export type CategoryDraft = Pick<Category, 'name' | 'emoji' | 'color' | 'owner_id' | 'kind'> & { id?: string };
+export type CategoryDraft = Pick<Category, 'name' | 'emoji' | 'color' | 'owner_id' | 'kind' | 'parent_id' | 'default_shared'> & {
+  id?: string;
+};
 export type SavingsAccountDraft = Pick<
   SavingsAccount,
   'name' | 'emoji' | 'color' | 'owner_id' | 'goal_cents' | 'initial_cents' | 'archived'
@@ -59,6 +71,7 @@ interface DataContextValue extends Snapshot {
   saveCategory: (draft: CategoryDraft) => Promise<Category>;
   deleteCategory: (id: string) => Promise<void>;
   setLimit: (categoryId: string, month: string, cents: number | null) => Promise<void>;
+  saveSettings: (patch: Partial<AppSettings>) => Promise<void>;
 
   saveSavingsAccount: (draft: SavingsAccountDraft) => Promise<SavingsAccount>;
   deleteSavingsAccount: (id: string) => Promise<void>;
@@ -92,9 +105,10 @@ export function useReportInput(): ReportInput {
       savingsAccounts: d.savingsAccounts,
       recurring: d.recurring,
       profiles: d.profiles,
+      carryFrom: d.settings.carry_from,
       today: todayISO(),
     }),
-    [d.allTransactions, d.categories, d.limits, d.savingsAccounts, d.recurring, d.profiles],
+    [d.allTransactions, d.categories, d.limits, d.savingsAccounts, d.recurring, d.profiles, d.settings.carry_from],
   );
 }
 
@@ -131,7 +145,15 @@ const normRecurring = (r: Row) =>
     savings_account_id: r.savings_account_id ?? null,
   }) as Recurring;
 const normLimit = (r: Row) => ({ ...r, amount_cents: r.amount_cents == null ? null : Number(r.amount_cents) }) as CategoryLimit;
-const normCategory = (r: Row) => ({ ...r, kind: r.kind ?? 'expense', sort_order: Number(r.sort_order) }) as Category;
+const normCategory = (r: Row) =>
+  ({
+    ...r,
+    kind: r.kind ?? 'expense',
+    parent_id: r.parent_id ?? null,
+    default_shared: Boolean(r.default_shared),
+    sort_order: Number(r.sort_order),
+  }) as Category;
+const normSettings = (r: Row | null | undefined): AppSettings => ({ carry_from: (r?.carry_from as string | null) ?? null });
 const normSavings = (r: Row) =>
   ({
     ...r,
@@ -202,6 +224,7 @@ function hydrate(userId: string): Snapshot {
     limits: cached.limits ?? [],
     savingsAccounts: (cached.savingsAccounts ?? []).map((a) => normSavings(a as unknown as Row)),
     recurring: (cached.recurring ?? []).map((r) => normRecurring(r as unknown as Row)),
+    settings: normSettings(cached.settings as unknown as Row),
     years,
     transactions: (cached.transactions ?? [])
       .map((t) => normTx(t as unknown as Row))
@@ -303,12 +326,13 @@ export function DataProvider({ userId, children }: { userId: string; children: R
         const rec = await supabase.rpc('apply_recurring', { p_today: todayISO() });
         if (rec.error && isNetworkError(rec.error)) throw rec.error;
 
-        const [profiles, categories, limits, savingsAccounts, recurring, savingsMovements] = await Promise.all([
+        const [profiles, categories, limits, savingsAccounts, recurring, settings, savingsMovements] = await Promise.all([
           fetchTable('profiles', (r) => r as unknown as Profile),
           fetchTable('categories', normCategory),
           fetchTable('category_limits', normLimit),
           fetchTable('savings_accounts', normSavings),
           fetchTable('recurring', normRecurring),
+          fetchTable('app_settings', normSettings),
           fetchSavingsMovements(),
         ]);
         const thisYear = new Date().getFullYear();
@@ -323,6 +347,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
             limits,
             savingsAccounts: bySortOrder(savingsAccounts),
             recurring,
+            settings: settings[0] ?? EMPTY.settings,
           };
           years.forEach((y, i) => (next = replaceYear(next, y, perYear[i], since)));
           next = { ...next, transactions: replaceWhere(next, (t) => t.kind === 'saving', savingsMovements, since) };
@@ -396,6 +421,9 @@ export function DataProvider({ userId, children }: { userId: string; children: R
       .on('postgres_changes', { ...changes, table: 'recurring' }, byId('recurring', normRecurring))
       .on('postgres_changes', { ...changes, table: 'profiles' }, byId('profiles', (r) => r as unknown as Profile))
       .on('postgres_changes', { ...changes, table: 'category_limits' }, onLimit)
+      .on('postgres_changes', { ...changes, table: 'app_settings' }, (p: RealtimePostgresChangesPayload<Row>) => {
+        if (p.eventType !== 'DELETE') setSnap((s) => ({ ...s, settings: normSettings(p.new) }));
+      })
       // The database feed is ready a moment after the channel itself. Changes made
       // before that (or while disconnected) aren't pushed, so catch up with a reload.
       .on('system', {}, (m: { extension?: string; status?: string }) => {
@@ -519,23 +547,32 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     const { data, error } = await q;
     if (error || !data?.length) throw new Error(error ? errorMessage(error) : "You can't edit this category");
     const saved = normCategory(data[0]);
-    setSnap((s) => ({ ...s, categories: bySortOrder(upsertById(s.categories, saved)) }));
+    // the database gives subcategories the owner and color of their main category; mirror that right away
+    const withSubs = (list: Category[]) =>
+      list.map((c) => (c.parent_id === saved.id ? { ...c, owner_id: saved.owner_id, color: saved.color } : c));
+    setSnap((s) => ({ ...s, categories: bySortOrder(withSubs(upsertById(s.categories, saved))) }));
     return saved;
   }, []);
 
   const deleteCategory = useCallback<DataContextValue['deleteCategory']>(async (id) => {
     const { data, error } = await supabase.from('categories').delete().eq('id', id).select('id');
     if (error || !data?.length) throw new Error(error ? errorMessage(error) : "You can't delete this category");
-    // the database moves its entries to "Other" / "Other income"; mirror that locally right away
+    // The database moves a subcategory's entries up to its main category, and a main category's
+    // entries (its subcategories' too, which are deleted with it) to "Other" / "Other income".
+    // Mirror that locally right away.
     setSnap((s) => {
-      const kind = s.categories.find((c) => c.id === id)?.kind ?? 'expense';
-      const other = s.categories.find((c) => c.is_system && c.kind === kind)?.id ?? null;
+      const cat = s.categories.find((c) => c.id === id);
+      const kind = cat?.kind ?? 'expense';
+      const target = cat?.parent_id ?? s.categories.find((c) => c.is_system && c.kind === kind)?.id ?? null;
+      const gone = new Set([id, ...s.categories.filter((c) => c.parent_id === id).map((c) => c.id)]);
+      const move = <T extends { category_id: string | null }>(x: T): T =>
+        x.category_id && gone.has(x.category_id) ? { ...x, category_id: target } : x;
       return {
         ...s,
-        categories: s.categories.filter((c) => c.id !== id),
-        limits: s.limits.filter((l) => l.category_id !== id),
-        transactions: s.transactions.map((t) => (t.category_id === id ? { ...t, category_id: other } : t)),
-        recurring: s.recurring.map((r) => (r.category_id === id ? { ...r, category_id: other } : r)),
+        categories: s.categories.filter((c) => !gone.has(c.id)),
+        limits: s.limits.filter((l) => !gone.has(l.category_id)),
+        transactions: s.transactions.map(move),
+        recurring: s.recurring.map(move),
       };
     });
   }, []);
@@ -552,6 +589,12 @@ export function DataProvider({ userId, children }: { userId: string; children: R
       ...s,
       limits: [...s.limits.filter((l) => l.category_id !== categoryId || l.effective_from < from), row],
     }));
+  }, []);
+
+  const saveSettings = useCallback<DataContextValue['saveSettings']>(async (patch) => {
+    const { data, error } = await supabase.from('app_settings').update(patch).eq('id', true).select();
+    if (error || !data?.length) throw new Error(error ? errorMessage(error) : "Settings couldn't be saved");
+    setSnap((s) => ({ ...s, settings: normSettings(data[0]) }));
   }, []);
 
   const saveSavingsAccount = useCallback<DataContextValue['saveSavingsAccount']>(async ({ id, ...fields }) => {
@@ -683,6 +726,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     saveCategory,
     deleteCategory,
     setLimit,
+    saveSettings,
     saveSavingsAccount,
     deleteSavingsAccount,
     saveRecurring,

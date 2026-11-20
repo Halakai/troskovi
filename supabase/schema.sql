@@ -32,17 +32,21 @@ create table if not exists public.profiles (
 -- owner_id NULL = shared category, otherwise private to that person
 -- (private categories are only offered in the owner's picker, but entries
 -- that use them are visible to everyone).
+-- parent_id set = subcategory of that (main) category. Only one level deep;
+-- a subcategory is always in the same list and as shared/private as its main one.
 create table if not exists public.categories (
-  id         uuid primary key default gen_random_uuid(),
-  name       text not null check (length(trim(name)) between 1 and 40),
-  emoji      text not null default '📦',
-  color      text not null default '#64748b',
-  kind       text not null default 'expense',
-  owner_id   uuid references public.profiles(id) on delete cascade,
-  is_system  boolean not null default false,   -- the undeletable "Other" / "Other income"
-  sort_order integer not null default 100,
-  created_by uuid default auth.uid() references public.profiles(id) on delete set null,
-  created_at timestamptz not null default now()
+  id             uuid primary key default gen_random_uuid(),
+  name           text not null check (length(trim(name)) between 1 and 40),
+  emoji          text not null default '📦',
+  color          text not null default '#64748b',
+  kind           text not null default 'expense',
+  owner_id       uuid references public.profiles(id) on delete cascade,
+  parent_id      uuid references public.categories(id) on delete cascade,
+  default_shared boolean not null default false,   -- new entries in it start as "Shared" instead of "whoever adds it"
+  is_system      boolean not null default false,   -- the undeletable "Other" / "Other income"
+  sort_order     integer not null default 100,
+  created_by     uuid default auth.uid() references public.profiles(id) on delete set null,
+  created_at     timestamptz not null default now()
 );
 
 -- Monthly limit per category. A row applies from effective_from (1st of a
@@ -109,11 +113,22 @@ create table if not exists public.transactions (
 );
 create index if not exists transactions_date_idx on public.transactions (date);
 
+-- Settings for the whole household: always exactly one row.
+-- carry_from: from this month on, whatever is left at the end of a month is
+-- carried into the next one (NULL = every month starts from zero).
+create table if not exists public.app_settings (
+  id         boolean primary key default true check (id),
+  carry_from date check (carry_from is null or extract(day from carry_from) = 1),
+  updated_at timestamptz not null default now()
+);
+
 -- ---------------------------------------------------------------------
 --  Upgrades for databases created by an older version of this file
 -- ---------------------------------------------------------------------
 
 alter table public.categories   add column if not exists kind text not null default 'expense';
+alter table public.categories   add column if not exists parent_id uuid references public.categories(id) on delete cascade;
+alter table public.categories   add column if not exists default_shared boolean not null default false;
 alter table public.recurring    add column if not exists savings_account_id uuid references public.savings_accounts(id) on delete cascade;
 alter table public.transactions add column if not exists savings_account_id uuid references public.savings_accounts(id) on delete restrict;
 
@@ -125,6 +140,7 @@ alter table public.categories drop constraint if exists categories_kind_check;
 alter table public.categories add constraint categories_kind_check check (kind in ('expense', 'income'));
 drop index if exists public.categories_single_system;
 create unique index if not exists categories_single_system_per_kind on public.categories (kind) where is_system;
+create index if not exists categories_parent_idx on public.categories (parent_id) where parent_id is not null;
 
 alter table public.recurring drop constraint if exists recurring_kind_check;
 alter table public.recurring add constraint recurring_kind_check check (kind in ('expense', 'income', 'saving'));
@@ -231,18 +247,70 @@ drop trigger if exists categories_before_update on public.categories;
 create trigger categories_before_update before update on public.categories
   for each row execute function public.tg_categories_before_update();
 
--- Deleting a category moves everything that used it to "Other" (or "Other income").
+-- Subcategories: one level deep, same list as the main category, and shared or
+-- private (and colored) exactly like it. (Runs after categories_before_update – triggers fire
+-- in name order – so kind and is_system are already the stored ones.)
+create or replace function public.tg_categories_before_write() returns trigger
+language plpgsql set search_path = '' as $$
+declare
+  p public.categories;
+begin
+  if new.parent_id is null then return new; end if;
+  select * into p from public.categories where id = new.parent_id;
+  if not found then raise exception 'That main category does not exist'; end if;
+  if new.parent_id = new.id then raise exception 'A category cannot be its own subcategory'; end if;
+  if new.is_system then raise exception 'The "%" category cannot be a subcategory', new.name; end if;
+  if p.parent_id is not null then raise exception 'A subcategory cannot have subcategories of its own'; end if;
+  if p.kind <> new.kind then raise exception 'A subcategory must be in the same list as its main category'; end if;
+  if tg_op = 'UPDATE' and exists (select 1 from public.categories c where c.parent_id = new.id) then
+    raise exception '"%" has subcategories, so it cannot become a subcategory itself', new.name;
+  end if;
+  new.owner_id := p.owner_id;
+  new.color := p.color;
+  return new;
+end $$;
+
+drop trigger if exists categories_before_write on public.categories;
+create trigger categories_before_write before insert or update on public.categories
+  for each row execute function public.tg_categories_before_write();
+
+-- A main category that becomes shared or private (or gets a new color) takes its subcategories along.
+create or replace function public.tg_categories_after_update() returns trigger
+language plpgsql security definer set search_path = '' as $$
+begin
+  if new.owner_id is distinct from old.owner_id or new.color is distinct from old.color then
+    update public.categories set owner_id = new.owner_id, color = new.color where parent_id = new.id;
+  end if;
+  return null;
+end $$;
+
+drop trigger if exists categories_after_update on public.categories;
+create trigger categories_after_update after update on public.categories
+  for each row execute function public.tg_categories_after_update();
+
+-- Deleting a subcategory moves its entries up to the main category. Deleting a
+-- main category moves its entries and those of its subcategories to "Other"
+-- (or "Other income") and deletes the subcategories with it.
 create or replace function public.tg_categories_before_delete() returns trigger
 language plpgsql security definer set search_path = '' as $$
 declare
-  v_other uuid;
+  v_target uuid;
 begin
   if old.is_system then
     raise exception 'The "%" category cannot be deleted', old.name;
   end if;
-  select id into v_other from public.categories where is_system and kind = old.kind limit 1;
-  update public.transactions set category_id = v_other where category_id = old.id;
-  update public.recurring    set category_id = v_other where category_id = old.id;
+  if old.parent_id is not null then
+    v_target := old.parent_id;
+  else
+    select id into v_target from public.categories where is_system and kind = old.kind limit 1;
+    update public.transactions set category_id = v_target
+     where category_id in (select id from public.categories where parent_id = old.id);
+    update public.recurring set category_id = v_target
+     where category_id in (select id from public.categories where parent_id = old.id);
+    delete from public.categories where parent_id = old.id;
+  end if;
+  update public.transactions set category_id = v_target where category_id = old.id;
+  update public.recurring    set category_id = v_target where category_id = old.id;
   return old;
 end $$;
 
@@ -263,6 +331,7 @@ alter table public.category_limits  enable row level security;
 alter table public.savings_accounts enable row level security;
 alter table public.recurring        enable row level security;
 alter table public.transactions     enable row level security;
+alter table public.app_settings     enable row level security;
 
 -- profiles: read-only from the client, changed only through admin functions
 drop policy if exists profiles_select on public.profiles;
@@ -354,6 +423,15 @@ create policy transactions_update on public.transactions for update to authentic
 drop policy if exists transactions_delete on public.transactions;
 create policy transactions_delete on public.transactions for delete to authenticated
   using (public.is_admin());
+
+-- household settings: everyone reads and changes them (the single row is created below)
+drop policy if exists app_settings_select on public.app_settings;
+create policy app_settings_select on public.app_settings for select to authenticated
+  using (public.is_member());
+
+drop policy if exists app_settings_update on public.app_settings;
+create policy app_settings_update on public.app_settings for update to authenticated
+  using (public.is_member()) with check (public.is_member());
 
 -- ---------------------------------------------------------------------
 --  User management (all usernames / passwords live in auth.users)
@@ -542,8 +620,9 @@ end $$;
 -- ---------------------------------------------------------------------
 
 revoke all on public.profiles, public.categories, public.category_limits, public.savings_accounts,
-              public.recurring, public.transactions from anon;
+              public.recurring, public.transactions, public.app_settings from anon;
 grant select on public.profiles to authenticated;
+grant select, update on public.app_settings to authenticated;
 grant select, insert, update, delete on public.categories, public.category_limits, public.savings_accounts,
                                         public.recurring, public.transactions to authenticated;
 
@@ -578,7 +657,7 @@ do $$
 declare
   t text;
 begin
-  foreach t in array array['profiles', 'categories', 'category_limits', 'savings_accounts', 'recurring', 'transactions'] loop
+  foreach t in array array['profiles', 'categories', 'category_limits', 'savings_accounts', 'recurring', 'transactions', 'app_settings'] loop
     if not exists (select 1 from pg_publication_tables
                     where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t) then
       execute format('alter publication supabase_realtime add table public.%I', t);
@@ -620,6 +699,11 @@ from (values
   ('Other income', '💰', '#64748b', 999, true)
 ) as v(name, emoji, color, sort_order, is_system)
 where not exists (select 1 from public.categories where kind = 'income');
+
+-- New installs carry leftover money over from the month they start in.
+insert into public.app_settings (id, carry_from)
+values (true, date_trunc('month', current_date)::date)
+on conflict (id) do nothing;
 
 -- First admin account: david / admin  (change the password in the app!)
 select public._create_user('david', 'admin', 'David', true, '#3b82f6')

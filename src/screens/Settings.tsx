@@ -5,7 +5,8 @@ import type { ThemePref } from '../lib/theme';
 import { navigate } from '../lib/router';
 import { BUILD_TIME } from '../lib/pwa';
 import { useToast } from '../components/Toast';
-import { Avatar, ColorPicker, Field, Segmented, Sheet, TopBar } from '../components/ui';
+import { addMonths, currentMonth, formatMonth, monthOf, monthStart } from '../lib/dates';
+import { Avatar, ColorPicker, Field, Segmented, Sheet, Toggle, TopBar } from '../components/ui';
 import { IconRight } from '../components/Icons';
 
 interface Props {
@@ -17,7 +18,8 @@ interface Props {
 export function Settings({ theme, setTheme, onSignOut }: Props) {
   const data = useData();
   const me = data.me!;
-  const [sheet, setSheet] = useState<'password' | 'profile' | null>(null);
+  const [sheet, setSheet] = useState<'password' | 'profile' | 'carry' | null>(null);
+  const carryFrom = data.settings.carry_from;
 
   return (
     <>
@@ -74,6 +76,15 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
           <button className="menu-item" onClick={() => navigate('/savings')}>
             🐷 Savings accounts <IconRight />
           </button>
+          <button className="menu-item" onClick={() => setSheet('carry')}>
+            <span>
+              💶 Leftover money
+              <span className="dim small block">
+                {carryFrom ? `Carried into the next month since ${formatMonth(monthOf(carryFrom))}` : 'Every month starts from zero'}
+              </span>
+            </span>
+            <IconRight />
+          </button>
         </div>
       </section>
 
@@ -111,6 +122,7 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
 
       {sheet === 'password' && <PasswordSheet onClose={() => setSheet(null)} />}
       {sheet === 'profile' && <MyProfileSheet onClose={() => setSheet(null)} />}
+      {sheet === 'carry' && <CarrySheet onClose={() => setSheet(null)} />}
     </>
   );
 }
@@ -205,6 +217,65 @@ function MyProfileSheet({ onClose }: { onClose: () => void }) {
           <div className="field-label">My color</div>
           <ColorPicker value={color} onChange={setColor} />
         </div>
+        <button className="btn btn-primary btn-block" disabled={busy}>
+          {busy ? 'Saving…' : 'Save'}
+        </button>
+      </form>
+    </Sheet>
+  );
+}
+
+function CarrySheet({ onClose }: { onClose: () => void }) {
+  const { settings, saveSettings } = useData();
+  const toast = useToast();
+  const now = currentMonth();
+  const [on, setOn] = useState(settings.carry_from !== null);
+  const [from, setFrom] = useState(settings.carry_from ? monthOf(settings.carry_from) : now);
+  const [busy, setBusy] = useState(false);
+
+  // the last two years to choose from (plus the stored month, if it's older)
+  const months = Array.from({ length: 24 }, (_, i) => addMonths(now, -i));
+  if (!months.includes(from)) months.push(from);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await saveSettings({ carry_from: on ? monthStart(from) : null });
+      toast('Saved');
+      onClose();
+    } catch (e) {
+      toast(errorMessage(e), 'error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Sheet title="Leftover money" onClose={onClose}>
+      <form
+        className="stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save();
+        }}
+      >
+        <p className="small dim">
+          Money that's left at the end of a month doesn't disappear from the bank – so it can start the next month. It
+          shows in the month overview as “Left over from …” and is added to what's left to spend. It isn't income, so
+          income totals stay as they are. A month that ends below zero carries the minus too.
+        </p>
+        <Toggle checked={on} onChange={setOn} label="Carry leftover into the next month" />
+        {on && (
+          <Field label="Starting with" hint={`${formatMonth(from)} starts from zero; what's left of it goes into ${formatMonth(addMonths(from, 1))}, and so on.`}>
+            <select className="input" value={from} onChange={(e) => setFrom(e.target.value)}>
+              {months.map((m) => (
+                <option key={m} value={m}>
+                  {formatMonth(m)}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <button className="btn btn-primary btn-block" disabled={busy}>
           {busy ? 'Saving…' : 'Save'}
         </button>

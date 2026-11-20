@@ -1,28 +1,33 @@
 import type { Transaction } from '../types';
 import { formatMoney } from '../lib/money';
-import { formatDay } from '../lib/dates';
+import { formatDay, todayISO } from '../lib/dates';
+import { isPlanned } from '../lib/stats';
 import { CatIcon, useLookups } from './ui';
-import { IconCloudOff, IconLock, IconRepeat } from './Icons';
+import { IconClock, IconCloudOff, IconLock, IconRepeat } from './Icons';
 
 export function TxRow({ tx, onClick, showDate }: { tx: Transaction; onClick?: () => void; showDate?: boolean }) {
-  const { category, account, personName, personColor } = useLookups();
+  const { category, parent, account, personName, personColor } = useLookups();
   const isSaving = tx.kind === 'saving';
   const cat = isSaving ? undefined : category(tx.category_id, tx.kind === 'income' ? 'income' : 'expense');
   const acc = isSaving ? account(tx.savings_account_id) : undefined;
   const icon = isSaving ? (acc ?? { emoji: '🐷', color: '#14b8a6' }) : cat;
   const title = isSaving ? (acc?.name ?? 'Savings') : (cat?.name ?? 'Other');
+  const main = parent(cat);
+  const planned = isPlanned(tx, todayISO());
   const label = isSaving ? (tx.amount_cents < 0 ? 'taken out' : 'saved') : null;
   const amount = Math.abs(tx.amount_cents);
   const sign = tx.kind === 'expense' || tx.amount_cents < 0 ? '−' : '+';
   const tone = tx.kind === 'income' ? 'pos' : isSaving ? 'save' : '';
 
   return (
-    <button className="tx" onClick={onClick}>
+    <button className={`tx ${planned ? 'tx-planned' : ''}`} onClick={onClick}>
       <CatIcon category={icon} />
       <span className="tx-main">
         <span className="tx-title">
-          {title}
+          <span className="tx-name">{title}</span>
+          {main && <span className="tx-parent">{main.name}</span>}
           {(cat?.owner_id || acc?.owner_id) && <IconLock className="tx-flag" />}
+          {planned && <IconClock className="tx-flag" aria-label="planned" />}
           {tx.recurring_id && <IconRepeat className="tx-flag" />}
           {tx.pending && <IconCloudOff className="tx-flag tx-pending" />}
         </span>

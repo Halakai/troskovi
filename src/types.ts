@@ -21,10 +21,20 @@ export interface Category {
   kind: CategoryKind;
   /** null = shared, otherwise private to this person */
   owner_id: string | null;
+  /** set = subcategory of that main category (only one level deep) */
+  parent_id: string | null;
+  /** new entries in this category start as "Shared" instead of the person adding them */
+  default_shared: boolean;
   is_system: boolean;
   sort_order: number;
   created_by: string | null;
   created_at: string;
+}
+
+/** Household-wide settings (one row). */
+export interface AppSettings {
+  /** YYYY-MM-01: from this month on, what's left at the end of a month carries into the next. null = off */
+  carry_from: string | null;
 }
 
 export interface CategoryLimit {

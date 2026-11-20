@@ -1,13 +1,14 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useData } from '../data/DataProvider';
 import { errorMessage } from '../supabase';
 import type { Category, CategoryKind, Kind, SavingsAccount, Transaction, TransactionInput } from '../types';
 import { centsToInput, parseAmount } from '../lib/money';
 import { formatDay, ordinal, todayISO } from '../lib/dates';
+import { isMainIn } from '../lib/categories';
 import { navigate } from '../lib/router';
 import { useToast } from './Toast';
 import { DateInput, Field, Segmented, Sheet, Toggle, useLookups } from './ui';
-import { IconLock } from './Icons';
+import { IconClock, IconLock } from './Icons';
 
 export interface NewEntryDefaults {
   date?: string;
@@ -44,7 +45,12 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
     income: tx?.kind === 'income' ? tx.category_id : null,
   });
   const [accountId, setAccountId] = useState<string | null>(tx?.savings_account_id ?? defaults.accountId ?? null);
+  // New entries start as the category's default person (the one adding it, or Shared) until
+  // the person is picked by hand.
+  const defaultPerson = (categoryId: string | null) =>
+    data.categories.find((c) => c.id === categoryId)?.default_shared ? 'shared' : data.userId;
   const [person, setPerson] = useState<string>(tx ? (tx.person_id ?? 'shared') : data.userId);
+  const [personPicked, setPersonPicked] = useState(!isNew);
   const [date, setDate] = useState(tx?.date ?? defaults.date ?? todayISO());
   const [note, setNote] = useState(tx?.note ?? '');
   const [repeat, setRepeat] = useState(false);
@@ -57,8 +63,11 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const cents = parseAmount(amount);
   const canRepeat = !(isSaving && direction === 'out');
 
+  const txCategory = data.categories.find((c) => c.id === tx?.category_id);
   const pickableCats = data.categories.filter(
-    (c) => c.kind === catKind && (c.owner_id === null || c.owner_id === data.userId || c.id === tx?.category_id),
+    (c) =>
+      c.kind === catKind &&
+      (c.owner_id === null || c.owner_id === data.userId || c.id === txCategory?.id || c.id === txCategory?.parent_id),
   );
   const pickableAccounts = data.savingsAccounts.filter(
     (a) => (!a.archived && (a.owner_id === null || a.owner_id === data.userId)) || a.id === tx?.savings_account_id,
@@ -70,6 +79,16 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const amountError = showErrors && cents === null;
   const pickError = showErrors && (isSaving ? !accountId : !categoryId);
   const dateError = showErrors && !date;
+  const planned = Boolean(date) && date > todayISO();
+
+  const pickCategory = (id: string) => {
+    setCats((c) => ({ ...c, [catKind]: id }));
+    if (!personPicked) setPerson(defaultPerson(id));
+  };
+  const changeKind = (k: Kind) => {
+    setKind(k);
+    if (!personPicked) setPerson(k === 'saving' ? data.userId : defaultPerson(cats[k === 'income' ? 'income' : 'expense']));
+  };
 
   async function save() {
     if (cents === null || (isSaving ? !accountId : !categoryId) || !date) {
@@ -139,7 +158,7 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
         <fieldset disabled={!canEdit || busy} className="stack">
           <Segmented<Kind>
             value={kind}
-            onChange={setKind}
+            onChange={changeKind}
             options={[
               { value: 'expense', label: 'Expense' },
               { value: 'income', label: 'Income' },
@@ -186,7 +205,7 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
             <CategoryPicker
               categories={pickableCats}
               value={categoryId}
-              onChange={(id) => setCats((c) => ({ ...c, [catKind]: id }))}
+              onChange={pickCategory}
               error={pickError}
             />
           )}
@@ -195,7 +214,10 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
             <div className="field-label">{whoLabel}</div>
             <Segmented
               value={person}
-              onChange={setPerson}
+              onChange={(p) => {
+                setPerson(p);
+                setPersonPicked(true);
+              }}
               options={[
                 ...people.map((p) => ({ value: p.id, label: p.display_name, color: p.color })),
                 { value: 'shared', label: '🤝 Shared', color: personColor(null) },
@@ -204,7 +226,18 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
           </div>
 
           <div className="row-2">
-            <Field label="Date" hint={dateError ? <span className="text-danger">Pick a date</span> : undefined}>
+            <Field
+              label="Date"
+              hint={
+                dateError ? (
+                  <span className="text-danger">Pick a date</span>
+                ) : planned ? (
+                  <span className="planned-hint">
+                    <IconClock /> Planned – counts from that day on
+                  </span>
+                ) : undefined
+              }
+            >
               <DateInput value={date} onChange={setDate} />
             </Field>
             <Field label="Note (optional)">
@@ -259,6 +292,12 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   );
 }
 
+const GRID_COLUMNS = 4; // keep in sync with .cat-grid in styles.css
+
+/**
+ * Main categories as tiles. A main category with subcategories opens a row of
+ * subcategory chips right below its tile row; picking one is optional.
+ */
 function CategoryPicker({
   categories,
   value,
@@ -270,24 +309,52 @@ function CategoryPicker({
   onChange: (id: string) => void;
   error: boolean;
 }) {
+  const isMain = isMainIn(categories);
+  const mains = categories.filter(isMain);
+  const picked = categories.find((c) => c.id === value);
+  const mainId = picked && !isMain(picked) ? picked.parent_id : (picked?.id ?? null);
+  const main = mains.find((c) => c.id === mainId);
+  const subs = mainId ? categories.filter((c) => c.parent_id === mainId) : [];
+  // the subcategory row goes after the last tile in the picked tile's row
+  const at = mains.findIndex((c) => c.id === mainId);
+  const rowEnd = at < 0 ? -1 : Math.min(mains.length - 1, Math.floor(at / GRID_COLUMNS) * GRID_COLUMNS + GRID_COLUMNS - 1);
+
   return (
     <div>
       <div className={`field-label ${error ? 'text-danger' : ''}`}>{error ? 'Pick a category' : 'Category'}</div>
       <div className="cat-grid">
-        {categories.map((c) => (
-          <button
-            type="button"
-            key={c.id}
-            className={`cat-pick ${c.id === value ? 'cat-pick-on' : ''}`}
-            style={c.id === value ? { borderColor: c.color, background: `${c.color}22` } : undefined}
-            onClick={() => onChange(c.id)}
-          >
-            <span className="cat-pick-emoji">{c.emoji}</span>
-            <span className="cat-pick-name">
-              {c.name}
-              {c.owner_id && <IconLock className="tx-flag" />}
-            </span>
-          </button>
+        {mains.map((c, i) => (
+          <Fragment key={c.id}>
+            <button
+              type="button"
+              className={`cat-pick ${c.id === mainId ? 'cat-pick-on' : ''}`}
+              style={c.id === mainId ? { borderColor: c.color, background: `${c.color}22` } : undefined}
+              onClick={() => onChange(c.id)}
+              aria-expanded={categories.some((s) => s.parent_id === c.id) ? c.id === mainId : undefined}
+            >
+              <span className="cat-pick-emoji">{c.emoji}</span>
+              <span className="cat-pick-name">
+                {c.name}
+                {c.owner_id && <IconLock className="tx-flag" />}
+              </span>
+            </button>
+            {i === rowEnd && subs.length > 0 && main && (
+              <div className="sub-picks" style={{ borderColor: `${main.color}55` }}>
+                {subs.map((s) => (
+                  <button
+                    type="button"
+                    key={s.id}
+                    className={`chip ${s.id === value ? 'chip-on' : ''}`}
+                    style={s.id === value ? { background: main.color } : undefined}
+                    // tapping the picked one again goes back to just the main category
+                    onClick={() => onChange(s.id === value ? main.id : s.id)}
+                  >
+                    {s.emoji} {s.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </Fragment>
         ))}
       </div>
     </div>

@@ -1,11 +1,12 @@
 import { useEffect, useMemo } from 'react';
 import { useData } from '../data/DataProvider';
-import { formatDayHeading, formatMonth, monthOf, yearOf } from '../lib/dates';
+import { formatDayHeading, formatMonth, monthOf, todayISO, yearOf } from '../lib/dates';
 import { formatMoney } from '../lib/money';
 import { navigate } from '../lib/router';
-import { categoryResolver } from '../lib/stats';
+import { categoryResolver, isPlanned } from '../lib/stats';
+import { withSubcategories } from '../lib/categories';
 import type { Transaction } from '../types';
-import { Empty, MonthSwitcher, TopBar } from '../components/ui';
+import { CategoryOptions, Empty, MonthSwitcher, TopBar } from '../components/ui';
 import { TxRow } from '../components/TxRow';
 
 interface Props {
@@ -39,11 +40,14 @@ export function History({ month, setMonth, params, onOpen }: Props) {
 
   const filtered = useMemo(() => {
     const resolve = categoryResolver(data.categories);
+    // a main category also shows the entries of its subcategories
+    const catIds = withSubcategories(data.categories, cat);
     const matchesCat = (t: Transaction) => {
       if (cat === 'all') return true;
       if (cat.startsWith('acc:')) return t.kind === 'saving' && t.savings_account_id === cat.slice(4);
       if (t.kind === 'saving') return false;
-      return resolve(t.category_id, t.kind)?.id === cat;
+      const c = resolve(t.category_id, t.kind);
+      return c !== undefined && catIds.has(c.id);
     };
     return data.allTransactions
       .filter((t) => monthOf(t.date) === month)
@@ -64,7 +68,10 @@ export function History({ month, setMonth, params, onOpen }: Props) {
     return groups;
   }, [filtered]);
 
-  const total = (k: Transaction['kind']) => filtered.filter((t) => t.kind === k).reduce((s, t) => s + t.amount_cents, 0);
+  // entries dated in the future don't count yet
+  const today = todayISO();
+  const total = (k: Transaction['kind']) =>
+    filtered.filter((t) => t.kind === k && !isPlanned(t, today)).reduce((s, t) => s + t.amount_cents, 0);
   const spent = total('expense');
   const income = total('income');
   const saved = total('saving');
@@ -95,20 +102,12 @@ export function History({ month, setMonth, params, onOpen }: Props) {
             <option value="all">{kind === 'saving' ? 'All accounts' : 'All categories'}</option>
             {(kind === 'all' || kind === 'expense') && (
               <optgroup label="Expense categories">
-                {expenseCats.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.emoji} {c.name}
-                  </option>
-                ))}
+                <CategoryOptions categories={expenseCats} />
               </optgroup>
             )}
             {(kind === 'all' || kind === 'income') && (
               <optgroup label="Income categories">
-                {incomeCats.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.emoji} {c.name}
-                  </option>
-                ))}
+                <CategoryOptions categories={incomeCats} />
               </optgroup>
             )}
             {(kind === 'all' || kind === 'saving') && data.savingsAccounts.length > 0 && (
@@ -159,8 +158,16 @@ export function History({ month, setMonth, params, onOpen }: Props) {
         days.map((d) => (
           <section key={d.date} className="card day">
             <div className="day-head">
-              <span>{formatDayHeading(d.date)}</span>
-              {d.spent > 0 && <span>−{formatMoney(d.spent)}</span>}
+              <span>
+                {formatDayHeading(d.date)}
+                {isPlanned(d, today) && (
+                  <>
+                    {' · '}
+                    <span className="text-accent">planned</span>
+                  </>
+                )}
+              </span>
+              {d.spent > 0 && <span className={isPlanned(d, today) ? 'dim' : ''}>−{formatMoney(d.spent)}</span>}
             </div>
             {d.items.map((t) => (
               <TxRow key={t.id} tx={t} onClick={() => onOpen(t)} />

@@ -1,13 +1,13 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useData, useReportInput } from '../data/DataProvider';
-import { monthReport, type MonthReport, type PersonStat } from '../lib/stats';
+import { monthReport, type CategoryStat, type MonthReport, type PersonStat } from '../lib/stats';
 import { addMonths, formatDay, formatMonth, formatMonthShort, WEEKDAYS, yearOf } from '../lib/dates';
 import { formatMoney, percent } from '../lib/money';
 import { navigate } from '../lib/router';
 import type { Transaction } from '../types';
 import { Avatar, CatIcon, Donut, Empty, MonthSwitcher, Progress, TopBar, useLookups } from '../components/ui';
 import { TxRow } from '../components/TxRow';
-import { IconRepeat } from '../components/Icons';
+import { IconClock, IconDown, IconRepeat } from '../components/Icons';
 
 interface Props {
   month: string;
@@ -18,11 +18,14 @@ interface Props {
 export function Overview({ month, setMonth, onOpen }: Props) {
   const data = useData();
   const { ensureYear } = data;
+  const carryFrom = data.settings.carry_from;
 
   useEffect(() => {
     ensureYear(yearOf(month));
     ensureYear(yearOf(addMonths(month, -1)));
-  }, [month, ensureYear]);
+    // the leftover carried in depends on every month since carrying started
+    if (carryFrom) for (let y = yearOf(carryFrom); y < yearOf(month); y++) ensureYear(y);
+  }, [month, ensureYear, carryFrom]);
 
   const input = useReportInput();
   const report = useMemo(() => monthReport(input, month), [input, month]);
@@ -38,7 +41,7 @@ export function Overview({ month, setMonth, onOpen }: Props) {
 
       <Hero report={report} />
 
-      {report.transactions.length === 0 && report.upcoming.length === 0 ? (
+      {report.transactions.length === 0 && report.upcoming.length === 0 && !report.carriedIn ? (
         <div className="card">
           {loading ? (
             <Empty emoji="⏳" title="Loading…" />
@@ -50,7 +53,7 @@ export function Overview({ month, setMonth, onOpen }: Props) {
         </div>
       ) : (
         <>
-          <MoneyFlow report={report} />
+          <MoneyFlow report={report} onOpen={onOpen} />
           <People report={report} />
           <Categories report={report} />
           <Income report={report} />
@@ -99,7 +102,7 @@ function Hero({ report }: { report: MonthReport }) {
         </>
       )}
       <div className="hero-chips">
-        {diff !== null && (
+        {diff !== null && !report.isFuture && (
           <span className={`chip ${diff > 0 ? 'chip-bad' : 'chip-good'}`}>
             {diff > 0 ? '▲' : '▼'} {Math.abs(diff)}% vs {formatMonthShort(addMonths(report.month, -1))}
           </span>
@@ -107,14 +110,20 @@ function Hero({ report }: { report: MonthReport }) {
         {report.projected !== null && report.projected > report.spent && (
           <span className="chip">🔮 heading for {formatMoney(report.projected, { whole: true })}</span>
         )}
+        {report.plannedExpenses > 0 && (
+          <span className="chip">
+            <IconClock /> {formatMoney(report.plannedExpenses, { whole: true })} planned
+          </span>
+        )}
       </div>
     </section>
   );
 }
 
-function MoneyFlow({ report }: { report: MonthReport }) {
-  const { personName } = useLookups();
-  if (!report.income && !report.expectedIncome && !report.upcoming.length) {
+function MoneyFlow({ report, onOpen }: { report: MonthReport; onOpen: (tx: Transaction) => void }) {
+  const { category, account, personName } = useLookups();
+  const carried = report.carriedIn ?? 0;
+  if (!report.income && !report.expectedIncome && !report.upcoming.length && !carried) {
     return (
       <section className="card card-tip">
         💡 Add your salaries as <b>monthly income</b> (⚙️ → Monthly items) to see how much is left to spend each month –
@@ -122,10 +131,18 @@ function MoneyFlow({ report }: { report: MonthReport }) {
       </section>
     );
   }
+  const prevName = formatMonth(addMonths(report.month, -1)).split(' ')[0];
+  const nextName = formatMonth(addMonths(report.month, 1)).split(' ')[0];
   return (
     <section className="card">
       <h3>Money flow</h3>
       <div className="flow">
+        {carried !== 0 && (
+          <div className="flow-row">
+            <span>{carried > 0 ? `Left over from ${prevName}` : `Overspent in ${prevName}`}</span>
+            <span className={carried > 0 ? 'pos' : 'text-danger'}>{formatMoney(carried, { sign: true })}</span>
+          </div>
+        )}
         <div className="flow-row">
           <span>Income received</span>
           <span className="pos">{formatMoney(report.income)}</span>
@@ -142,7 +159,7 @@ function MoneyFlow({ report }: { report: MonthReport }) {
         </div>
         {report.upcomingExpenses > 0 && (
           <div className="flow-row dim">
-            <span>Bills still coming</span>
+            <span>Still to pay</span>
             <span>−{formatMoney(report.upcomingExpenses)}</span>
           </div>
         )}
@@ -155,33 +172,63 @@ function MoneyFlow({ report }: { report: MonthReport }) {
             </span>
           </div>
         )}
-        {report.upcomingSavings > 0 && (
+        {report.upcomingSavings !== 0 && (
           <div className="flow-row dim">
-            <span>Savings still planned</span>
-            <span className="save">−{formatMoney(report.upcomingSavings)}</span>
+            <span>{report.upcomingSavings > 0 ? 'Savings still planned' : 'Still to take from savings'}</span>
+            <span className="save">
+              {report.upcomingSavings > 0 ? '−' : '+'}
+              {formatMoney(Math.abs(report.upcomingSavings))}
+            </span>
           </div>
         )}
         <div className="flow-row flow-total">
-          <span>{report.isCurrent ? 'Left to spend' : 'Balance'}</span>
+          <span>{report.isCurrent ? 'Left to spend' : report.isFuture ? 'Expected to be left' : 'Balance'}</span>
           <span className={report.leftToSpend < 0 ? 'text-danger' : 'pos'}>{formatMoney(report.leftToSpend, { sign: true })}</span>
         </div>
+        {report.carriesOver && !report.isCurrent && !report.isFuture && (
+          <div className="flow-note">carried into {nextName}</div>
+        )}
+        {report.isFuture && report.expectedIncome === 0 && (
+          <div className="flow-hint">
+            💡 No income expected yet – salaries added as monthly items (⚙️ → Monthly items) would show up here
+          </div>
+        )}
       </div>
       {report.upcoming.length > 0 && (
         <div className="upcoming">
-          {report.upcoming.map(({ item, date }) => (
-            <div key={item.id} className="upcoming-row">
-              <IconRepeat />
-              <span className="grow">
-                {item.kind === 'saving' && '🐷 '}
-                {item.name} <span className="dim">· {personName(item.person_id)}</span>
-              </span>
-              <span className="dim">{formatDay(date)}</span>
-              <span className={item.kind === 'income' ? 'pos' : item.kind === 'saving' ? 'save' : ''}>
-                {item.kind === 'income' ? '+' : '−'}
-                {formatMoney(item.amount_cents, { whole: true })}
-              </span>
-            </div>
-          ))}
+          {report.upcoming.map((u) => {
+            const tone = u.kind === 'income' ? 'pos' : u.kind === 'saving' ? 'save' : '';
+            const sign = u.kind === 'income' || u.amount_cents < 0 ? '+' : '−';
+            const name = u.recurring
+              ? u.recurring.name
+              : u.tx!.note ||
+                (u.kind === 'saving'
+                  ? account(u.tx!.savings_account_id)?.name
+                  : category(u.tx!.category_id, u.kind === 'income' ? 'income' : 'expense')?.name);
+            const body = (
+              <>
+                {u.recurring ? <IconRepeat /> : <IconClock />}
+                <span className="grow">
+                  {u.kind === 'saving' && '🐷 '}
+                  {name} <span className="dim">· {personName(u.person_id)}</span>
+                </span>
+                <span className="dim">{formatDay(u.date)}</span>
+                <span className={tone}>
+                  {sign}
+                  {formatMoney(Math.abs(u.amount_cents), { whole: true })}
+                </span>
+              </>
+            );
+            return u.tx ? (
+              <button key={u.tx.id} className="upcoming-row" onClick={() => onOpen(u.tx!)}>
+                {body}
+              </button>
+            ) : (
+              <div key={u.recurring!.id} className="upcoming-row">
+                {body}
+              </div>
+            );
+          })}
         </div>
       )}
     </section>
@@ -256,38 +303,88 @@ function People({ report }: { report: MonthReport }) {
   );
 }
 
-export function CategoryList({ stats, onPick, limitLabel = '' }: { stats: MonthReport['categories']; onPick?: (id: string) => void; limitLabel?: string }) {
+export function CategoryList({
+  stats,
+  onPick,
+  limitLabel = '',
+}: {
+  stats: CategoryStat[];
+  onPick?: (id: string) => void;
+  limitLabel?: string;
+}) {
   return (
     <div className="cat-list">
       {stats.map((s) => (
-        <button key={s.category.id} className="cat-row" onClick={() => onPick?.(s.category.id)}>
-          <CatIcon category={s.category} size={36} />
-          <span className="grow">
-            <span className="cat-row-top">
-              <span className="cat-row-name">{s.category.name}</span>
-              <span>
-                <b>{formatMoney(s.spent, { whole: s.spent >= 100000 })}</b>
-                {s.limit !== null && <span className="dim small"> / {formatMoney(s.limit, { whole: true })}{limitLabel}</span>}
-              </span>
-            </span>
-            {s.limit !== null ? (
-              <>
-                <Progress value={s.spent} max={s.limit} color={s.category.color} />
-                <span className={`small ${s.spent > s.limit ? 'text-danger' : 'dim'}`}>
-                  {s.spent > s.limit
-                    ? `${formatMoney(s.spent - s.limit, { whole: true })} over limit`
-                    : `${formatMoney(s.limit - s.spent, { whole: true })} left`}
-                </span>
-              </>
-            ) : (
-              <span className="small dim">
-                {s.count} ×{s.category.kind === 'expense' && ' · no limit'}
-              </span>
-            )}
-          </span>
-        </button>
+        <CategoryItem key={s.category.id} stat={s} onPick={onPick} limitLabel={limitLabel} />
       ))}
     </div>
+  );
+}
+
+function CategoryItem({ stat: s, onPick, limitLabel }: { stat: CategoryStat; onPick?: (id: string) => void; limitLabel: string }) {
+  const [open, setOpen] = useState(false);
+  const over = s.subs.filter((x) => x.limit !== null && x.spent > x.limit).length;
+  return (
+    <div className="cat-item">
+      <CategoryRow stat={s} onPick={onPick} limitLabel={limitLabel} />
+      {s.subs.length > 0 && (
+        <>
+          <button className={`cat-expand ${open ? 'cat-expand-open' : ''}`} onClick={() => setOpen(!open)} aria-expanded={open}>
+            <IconDown width={16} height={16} />
+            {s.subs.filter((x) => !x.general).length} subcategories
+            {over > 0 && !open && <span className="text-danger"> · {over} over limit</span>}
+          </button>
+          {open && (
+            <div className="cat-subs">
+              {s.subs.map((sub) => (
+                <CategoryRow key={sub.general ? 'general' : sub.category.id} stat={sub} onPick={onPick} limitLabel={limitLabel} sub />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CategoryRow({
+  stat: s,
+  onPick,
+  limitLabel,
+  sub,
+}: {
+  stat: CategoryStat;
+  onPick?: (id: string) => void;
+  limitLabel: string;
+  sub?: boolean;
+}) {
+  return (
+    <button className={`cat-row ${sub ? 'cat-row-sub' : ''}`} onClick={() => onPick?.(s.category.id)}>
+      <CatIcon category={s.category} size={sub ? 28 : 36} />
+      <span className="grow">
+        <span className="cat-row-top">
+          <span className="cat-row-name">{s.general ? 'General' : s.category.name}</span>
+          <span>
+            <b>{formatMoney(s.spent, { whole: s.spent >= 100000 })}</b>
+            {s.limit !== null && <span className="dim small"> / {formatMoney(s.limit, { whole: true })}{limitLabel}</span>}
+          </span>
+        </span>
+        {s.limit !== null ? (
+          <>
+            <Progress value={s.spent} max={s.limit} color={s.category.color} />
+            <span className={`small ${s.spent > s.limit ? 'text-danger' : 'dim'}`}>
+              {s.spent > s.limit
+                ? `${formatMoney(s.spent - s.limit, { whole: true })} over limit`
+                : `${formatMoney(s.limit - s.spent, { whole: true })} left`}
+            </span>
+          </>
+        ) : (
+          <span className="small dim">
+            {s.count} ×{s.general ? ' · no subcategory picked' : s.category.kind === 'expense' && !sub && ' · no limit'}
+          </span>
+        )}
+      </span>
+    </button>
   );
 }
 

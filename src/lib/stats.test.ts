@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Category, CategoryKind, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction } from '../types';
-import { limitFor, monthReport, savingsReport, upcomingRecurring, yearReport, type ReportInput } from './stats';
+import { carriedInto, limitFor, monthReport, savingsReport, upcomingRecurring, yearReport, type ReportInput } from './stats';
 
 const profile = (id: string, name: string, created: string): Profile => ({
   id,
@@ -12,13 +12,15 @@ const profile = (id: string, name: string, created: string): Profile => ({
   created_at: created,
 });
 
-const category = (id: string, kind: CategoryKind = 'expense', system = false): Category => ({
+const category = (id: string, kind: CategoryKind = 'expense', system = false, parent: string | null = null): Category => ({
   id,
   name: id,
   emoji: '🏷️',
   color: '#000',
   kind,
   owner_id: null,
+  parent_id: parent,
+  default_shared: false,
   is_system: system,
   sort_order: 1,
   created_by: null,
@@ -95,6 +97,7 @@ const input = (over: Partial<ReportInput>): ReportInput => ({
   savingsAccounts: [],
   recurring: [],
   profiles,
+  carryFrom: null,
   today: '2026-10-04',
   ...over,
 });
@@ -269,5 +272,158 @@ describe('yearReport', () => {
     expect(report.monthsWon.get('ana')).toBe(2);
     expect(report.monthsWon.get('david')).toBe(1);
     expect(report.categories.find((c) => c.category.id === 'food')?.limit).toBe(30000);
+  });
+});
+
+describe('entries dated in the future', () => {
+  const data = input({
+    today: '2026-11-20',
+    transactions: [
+      tx('2026-11-05', 2000, 'david'),
+      tx('2026-11-27', 23000, 'ana', 'food', { note: 'Kobasice' }),
+      tx('2026-12-03', 5000, null),
+      income('2026-11-30', 10000, 'ana', 'bonus'),
+      saving('2026-11-25', 4000, 'david', 'vacation'),
+    ],
+    savingsAccounts: [account('vacation')],
+  });
+
+  it('are planned, not spent, until their day comes', () => {
+    const m = monthReport(data, '2026-11');
+    expect(m.spent).toBe(2000);
+    expect(m.transactions.map((t) => t.date)).toEqual(['2026-11-05']);
+    expect(m.upcomingExpenses).toBe(23000);
+    expect(m.plannedExpenses).toBe(23000);
+    expect(m.expectedIncome).toBe(10000);
+    expect(m.upcomingSavings).toBe(4000);
+    expect(m.upcoming.map((u) => u.date)).toEqual(['2026-11-25', '2026-11-27', '2026-11-30']);
+    expect(m.upcoming[1].tx?.note).toBe('Kobasice');
+    expect(m.leftToSpend).toBe(10000 - 2000 - 23000 - 4000);
+    expect(m.categories.find((c) => c.category.id === 'food')?.spent).toBe(2000);
+    expect(m.people.find((p) => p.id === 'ana')?.spent).toBe(0);
+  });
+
+  it('count normally once the day has come', () => {
+    const m = monthReport({ ...data, today: '2026-11-27' }, '2026-11');
+    expect(m.spent).toBe(25000);
+    expect(m.plannedExpenses).toBe(0);
+    expect(m.upcoming.map((u) => u.date)).toEqual(['2026-11-30']);
+  });
+
+  it('show up in a future month as planned, and are left out of year and savings totals', () => {
+    const dec = monthReport(data, '2026-12');
+    expect(dec.isFuture).toBe(true);
+    expect(dec.spent).toBe(0);
+    expect(dec.upcomingExpenses).toBe(5000);
+    expect(yearReport(data, 2026).spent).toBe(2000);
+    expect(savingsReport(data).total).toBe(0);
+  });
+});
+
+describe('carrying leftover money into the next month', () => {
+  const data = input({
+    today: '2026-11-20',
+    carryFrom: '2026-10-01',
+    transactions: [
+      income('2026-09-01', 100000, 'david'), // before carrying starts – not carried
+      income('2026-10-01', 300000, 'david'),
+      tx('2026-10-10', 250000, null),
+      saving('2026-10-20', -20000, 'david', 'vacation'), // taken out of savings: more money to spend
+      income('2026-11-01', 200000, 'ana'),
+      tx('2026-11-02', 30000, 'ana'),
+      tx('2026-11-28', 10000, 'ana'), // planned
+    ],
+    recurring: [recurring({ amount_cents: 60000, day_of_month: 25, posted_through: '2026-10-01' })],
+  });
+
+  it('starts from zero in the first month', () => {
+    expect(carriedInto(data, '2026-10')).toBeNull();
+    expect(carriedInto(data, '2026-09')).toBeNull();
+    expect(monthReport(data, '2026-09').carriesOver).toBe(false);
+    expect(monthReport(data, '2026-10').carriesOver).toBe(true);
+    expect(monthReport(data, '2026-10').leftToSpend).toBe(300000 - 250000 + 20000);
+  });
+
+  it("adds the previous month's leftover to what's left to spend", () => {
+    const nov = monthReport(data, '2026-11');
+    expect(nov.carriedIn).toBe(70000);
+    expect(nov.income).toBe(200000); // not counted as income
+    expect(nov.leftToSpend).toBe(70000 + 200000 - 30000 - 10000 - 60000);
+  });
+
+  it('keeps rolling: a future month starts with what this month is expected to end with', () => {
+    expect(carriedInto(data, '2026-12')).toBe(70000 + 200000 - 30000 - 10000 - 60000);
+  });
+
+  it('carries a negative month as well', () => {
+    const short = input({ carryFrom: '2026-09-01', transactions: [tx('2026-09-03', 5000, 'david')] });
+    expect(monthReport(short, '2026-10').carriedIn).toBe(-5000);
+  });
+
+  it('is off without a start month', () => {
+    const nov = monthReport({ ...data, carryFrom: null }, '2026-11');
+    expect(nov.carriedIn).toBeNull();
+    expect(nov.leftToSpend).toBe(200000 - 30000 - 10000 - 60000);
+  });
+});
+
+describe('subcategories', () => {
+  const cats = [
+    ...categories,
+    category('eat', 'expense'),
+    category('mcd', 'expense', false, 'eat'),
+    category('wolt', 'expense', false, 'eat'),
+    category('bakery', 'expense', false, 'eat'),
+    category('stocks', 'income', false, 'salary'),
+  ];
+  const data = input({
+    categories: cats,
+    transactions: [
+      tx('2026-10-01', 1000, 'david', 'mcd'),
+      tx('2026-10-02', 1500, 'ana', 'mcd'),
+      tx('2026-10-02', 4000, 'ana', 'wolt'),
+      tx('2026-10-03', 700, 'david', 'eat'),
+      tx('2026-10-03', 3000, 'david', 'food'),
+      income('2026-10-01', 9000, 'david', 'stocks'),
+    ],
+    limits: [
+      { category_id: 'eat', effective_from: '2026-01-01', amount_cents: 10000 },
+      { category_id: 'wolt', effective_from: '2026-01-01', amount_cents: 3000 },
+      { category_id: 'bakery', effective_from: '2026-01-01', amount_cents: 2000 },
+    ],
+  });
+  const m = monthReport(data, '2026-10');
+  const eat = m.categories.find((c) => c.category.id === 'eat')!;
+
+  it('add up into their main category', () => {
+    expect(m.categories.map((c) => c.category.id)).toEqual(['eat', 'food']);
+    expect(eat).toMatchObject({ spent: 7200, count: 4, limit: 10000 });
+  });
+
+  it('are listed under it with their own limits, plus a general row', () => {
+    expect(eat.subs.map((s) => [s.category.id, s.spent, s.limit, Boolean(s.general)])).toEqual([
+      ['wolt', 4000, 3000, false],
+      ['mcd', 2500, null, false],
+      ['eat', 700, null, true],
+      ['bakery', 0, 2000, false],
+    ]);
+  });
+
+  it("don't count twice in the overall budget", () => {
+    // main limit covers its subcategories
+    expect(m.budget).toEqual({ limit: 10000, spent: 7200 });
+    // without a main limit, the subcategory limits count on their own
+    const subOnly = monthReport({ ...data, limits: data.limits.filter((l) => l.category_id !== 'eat') }, '2026-10');
+    expect(subOnly.budget).toEqual({ limit: 5000, spent: 4000 });
+  });
+
+  it('work for income too, and in the year report', () => {
+    expect(m.incomeCategories[0]).toMatchObject({ spent: 9000 });
+    expect(m.incomeCategories[0].category.id).toBe('salary');
+    const y = yearReport({ ...data, today: '2026-11-15' }, 2026);
+    const yEat = y.categories.find((c) => c.category.id === 'eat')!;
+    expect(yEat.spent).toBe(7200);
+    expect(yEat.limit).toBe(10000 * 11);
+    expect(yEat.subs.find((s) => s.category.id === 'wolt')?.limit).toBe(3000 * 11);
   });
 });

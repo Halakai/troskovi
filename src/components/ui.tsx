@@ -1,9 +1,10 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useData } from '../data/DataProvider';
-import { addMonths, currentMonth, formatDMY, formatMonth } from '../lib/dates';
+import { addMonths, currentMonth, daysInMonth, formatDMY, formatMonth, monthOf, monthStart, parseISODate, todayISO } from '../lib/dates';
 import { navigate } from '../lib/router';
 import { categoryResolver, SHARED_COLOR } from '../lib/stats';
+import { categoryTree } from '../lib/categories';
 import type { Category, CategoryKind, SavingsAccount } from '../types';
 import { IconBack, IconCalendar, IconClose, IconCloudOff, IconGear, IconLeft, IconRight } from './Icons';
 
@@ -12,11 +13,14 @@ import { IconBack, IconCalendar, IconClose, IconCloudOff, IconGear, IconLeft, Ic
 export function useLookups() {
   const { categories, profiles, savingsAccounts } = useData();
   const resolve = categoryResolver(categories);
+  const categoryById = new Map(categories.map((c) => [c.id, c]));
   const personById = new Map(profiles.map((p) => [p.id, p]));
   const accountById = new Map(savingsAccounts.map((a) => [a.id, a]));
   return {
     /** unknown / missing categories resolve to "Other" (or "Other income") */
     category: (id: string | null, kind: CategoryKind = 'expense'): Category | undefined => resolve(id, kind),
+    /** the main category of a subcategory (undefined for main categories) */
+    parent: (c: Category | undefined): Category | undefined => (c?.parent_id ? categoryById.get(c.parent_id) : undefined),
     account: (id: string | null): SavingsAccount | undefined => (id ? accountById.get(id) : undefined),
     personName: (id: string | null) => (id ? (personById.get(id)?.display_name ?? 'Unknown') : 'Shared'),
     personColor: (id: string | null) => (id ? (personById.get(id)?.color ?? SHARED_COLOR) : SHARED_COLOR),
@@ -71,7 +75,8 @@ export function MonthSwitcher({ month, onChange }: { month: string; onChange: (m
       <button className="switcher-label" onClick={() => onChange(now)} title="Back to this month">
         {formatMonth(month)}
       </button>
-      <button className="icon-btn" onClick={() => onChange(addMonths(month, 1))} aria-label="Next month" disabled={month >= now}>
+      {/* months ahead show what's planned: monthly items, entries dated in the future, expected leftover */}
+      <button className="icon-btn" onClick={() => onChange(addMonths(month, 1))} aria-label="Next month" disabled={month >= addMonths(now, 12)}>
         <IconRight />
       </button>
     </div>
@@ -241,32 +246,95 @@ export function Field({ label, hint, children }: { label: string; hint?: ReactNo
 }
 
 /**
- * Date field that always reads dd/mm/yyyy. Phones render <input type="date"> in the
- * phone's region format (often mm/dd/yyyy), so the real input sits invisibly on top of
- * our own text: tapping it still opens the phone's native calendar.
+ * Date field that always reads dd/mm/yyyy and opens our own calendar (weeks start on
+ * Monday). The phones' built-in pickers follow the phone's region settings, which a web
+ * app can't change – that's why this isn't <input type="date">.
  */
 export function DateInput({ value, onChange }: { value: string; onChange: (iso: string) => void }) {
+  const [open, setOpen] = useState(false);
   return (
-    <span className="input date-input">
-      <span className={value ? '' : 'dim'}>{value ? formatDMY(value) : 'dd/mm/yyyy'}</span>
-      <IconCalendar />
-      <input
-        type="date"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onClick={(e) => {
-          // computers only open the calendar from its small icon; phones open it on any tap
-          if (window.matchMedia('(pointer: fine)').matches) {
-            try {
-              e.currentTarget.showPicker();
-            } catch {
-              /* not supported or already open */
-            }
-          }
-        }}
-        aria-label="Date"
-      />
-    </span>
+    <>
+      <button type="button" className="input date-input" onClick={() => setOpen(true)} aria-label="Date">
+        <span className={value ? '' : 'dim'}>{value ? formatDMY(value) : 'dd/mm/yyyy'}</span>
+        <IconCalendar />
+      </button>
+      {open && (
+        <Calendar
+          value={value}
+          onPick={(iso) => {
+            onChange(iso);
+            setOpen(false);
+          }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+const WEEK_HEAD = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+
+function Calendar({ value, onPick, onClose }: { value: string; onPick: (iso: string) => void; onClose: () => void }) {
+  const today = todayISO();
+  const [month, setMonth] = useState(monthOf(value || today));
+
+  useEffect(() => {
+    // capture phase, so Escape closes only the calendar and not the sheet underneath
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      onClose();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [onClose]);
+
+  const lead = (parseISODate(monthStart(month)).getDay() + 6) % 7; // empty cells before the 1st (Monday first)
+  const days = Array.from({ length: daysInMonth(month) }, (_, i) => `${month}-${String(i + 1).padStart(2, '0')}`);
+
+  return createPortal(
+    <div className="cal-backdrop" onClick={onClose}>
+      <div className="cal" role="dialog" aria-modal="true" aria-label="Pick a date" onClick={(e) => e.stopPropagation()}>
+        <div className="cal-head">
+          <button type="button" className="icon-btn" onClick={() => setMonth(addMonths(month, -1))} aria-label="Previous month">
+            <IconLeft />
+          </button>
+          <b>{formatMonth(month)}</b>
+          <button type="button" className="icon-btn" onClick={() => setMonth(addMonths(month, 1))} aria-label="Next month">
+            <IconRight />
+          </button>
+        </div>
+        <div className="cal-grid">
+          {WEEK_HEAD.map((d, i) => (
+            <span key={d} className={`cal-dow ${i >= 5 ? 'cal-weekend' : ''}`}>
+              {d}
+            </span>
+          ))}
+          {Array.from({ length: lead }, (_, i) => (
+            <span key={`x${i}`} />
+          ))}
+          {days.map((iso, i) => (
+            <button
+              type="button"
+              key={iso}
+              className={`cal-day ${iso === value ? 'cal-day-on' : ''} ${iso === today ? 'cal-today' : ''} ${(lead + i) % 7 >= 5 ? 'cal-weekend' : ''}`}
+              onClick={() => onPick(iso)}
+            >
+              {i + 1}
+            </button>
+          ))}
+        </div>
+        <div className="cal-foot">
+          <button type="button" className="btn btn-ghost" onClick={() => onPick(today)}>
+            Today
+          </button>
+          <button type="button" className="btn btn-ghost" onClick={onClose}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -280,6 +348,23 @@ export function Toggle({ checked, onChange, label, hint }: { checked: boolean; o
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       <span className="toggle-track" aria-hidden="true" />
     </label>
+  );
+}
+
+/** non-breaking space: <option> text keeps it, so it can indent */
+const NBSP = String.fromCharCode(160);
+
+/** <option>s for a category <select>: main categories with their subcategories indented below. */
+export function CategoryOptions({ categories }: { categories: Category[] }) {
+  return (
+    <>
+      {categoryTree(categories).map(({ category: c, depth }) => (
+        <option key={c.id} value={c.id}>
+          {depth ? `${NBSP.repeat(4)}↳ ` : ''}
+          {c.emoji} {c.name}
+        </option>
+      ))}
+    </>
   );
 }
 

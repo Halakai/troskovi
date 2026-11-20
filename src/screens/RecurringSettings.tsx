@@ -5,7 +5,7 @@ import type { Kind, Recurring } from '../types';
 import { currentMonth, formatMonth, monthStart, ordinal } from '../lib/dates';
 import { centsToInput, formatMoney, parseAmount } from '../lib/money';
 import { useToast } from '../components/Toast';
-import { CatIcon, Empty, Field, Segmented, Sheet, Toggle, TopBar, useLookups } from '../components/ui';
+import { CategoryOptions, CatIcon, Empty, Field, Segmented, Sheet, Toggle, TopBar, useLookups } from '../components/ui';
 import { IconPlus, IconRight } from '../components/Icons';
 
 export function RecurringSettings() {
@@ -221,11 +221,7 @@ function RecurringSheet({ item, onClose }: { item: Recurring | null; onClose: ()
             <Field label="Category">
               <select className="input" value={categoryId} onChange={(e) => setCategoryId(e.target.value)}>
                 <option value="">Choose…</option>
-                {pickable.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.emoji} {c.name}
-                  </option>
-                ))}
+                <CategoryOptions categories={pickable} />
               </select>
             </Field>
           )}

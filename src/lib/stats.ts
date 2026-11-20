@@ -1,5 +1,5 @@
 // Pure report calculations (no React, no network) – easy to test.
-import type { Category, CategoryKind, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction } from '../types';
+import type { Category, CategoryKind, CategoryLimit, Kind, Profile, Recurring, SavingsAccount, Transaction } from '../types';
 import { addMonths, daysInMonth, monthOf, monthsOfYear, monthStart, parseISODate, recurringDate } from './dates';
 
 export interface ReportInput {
@@ -9,17 +9,26 @@ export interface ReportInput {
   savingsAccounts: SavingsAccount[];
   recurring: Recurring[];
   profiles: Profile[];
+  /** YYYY-MM-01: leftover money carries into the next month from this month on (null = off) */
+  carryFrom: string | null;
   /** local YYYY-MM-DD */
   today: string;
 }
 
 export interface CategoryStat {
   category: Category;
-  /** money spent (expense list) or received (income list) */
+  /** money spent (expense list) or received (income list); a main category includes its subcategories */
   spent: number;
   count: number;
   /** null = no limit set (always null for income) */
   limit: number | null;
+  /**
+   * Main categories that have subcategories: the subcategories with spending or a limit, plus a
+   * `general` row for entries that were put on the main category itself. Empty otherwise.
+   */
+  subs: CategoryStat[];
+  /** the "general" row inside `subs` (its `category` is the main category) */
+  general?: boolean;
 }
 
 export interface PersonStat {
@@ -36,9 +45,20 @@ export interface PersonStat {
   fairShare: number;
 }
 
-export interface UpcomingItem {
+export interface DueRecurring {
   item: Recurring;
   date: string;
+}
+
+/** Something that will still happen this month: a monthly item that isn't due yet, or an entry dated in the future. */
+export interface UpcomingItem {
+  date: string;
+  kind: Kind;
+  /** as stored: negative for a planned savings withdrawal */
+  amount_cents: number;
+  person_id: string | null;
+  recurring?: Recurring;
+  tx?: Transaction;
 }
 
 export interface AccountNet {
@@ -49,8 +69,11 @@ export interface AccountNet {
 
 export const SHARED_COLOR = '#94a3b8';
 
-const sum = (txs: Transaction[]) => txs.reduce((s, t) => s + t.amount_cents, 0);
-const ofKind = (txs: Transaction[], kind: Transaction['kind']) => txs.filter((t) => t.kind === kind);
+const sum = (txs: { amount_cents: number }[]) => txs.reduce((s, t) => s + t.amount_cents, 0);
+const ofKind = <T extends { kind: Kind }>(txs: T[], kind: Kind) => txs.filter((t) => t.kind === kind);
+
+/** An entry dated after today hasn't happened yet: until its day it only counts as planned. */
+export const isPlanned = (t: Pick<Transaction, 'date'>, today: string) => t.date > today;
 
 export function limitFor(limits: CategoryLimit[], categoryId: string, month: string): number | null {
   const start = monthStart(month);
@@ -72,7 +95,7 @@ export function members(profiles: Profile[], txs: Transaction[]): Profile[] {
 }
 
 /** Recurring items that will still be added in this month (not posted yet). */
-export function upcomingRecurring(recurring: Recurring[], month: string, today: string): UpcomingItem[] {
+export function upcomingRecurring(recurring: Recurring[], month: string, today: string): DueRecurring[] {
   if (month < monthOf(today)) return [];
   const start = monthStart(month);
   return recurring
@@ -122,31 +145,64 @@ function personStats(profiles: Profile[], txs: Transaction[]): PersonStat[] {
   return [...people.map((p) => row(p.id, p.display_name, p.color)), row(null, 'Shared', SHARED_COLOR)];
 }
 
-/** Per category of one list (expense or income). Limits are added up over `months` (expense list only). */
+const bySpent = (a: CategoryStat, b: CategoryStat) => b.spent - a.spent || (b.limit ?? 0) - (a.limit ?? 0);
+
+/**
+ * Per main category of one list (expense or income), each with its subcategories.
+ * Limits are added up over `months` (expense list only).
+ */
 function categoryStats(input: ReportInput, txs: Transaction[], months: string[], kind: CategoryKind): CategoryStat[] {
   const resolve = categoryResolver(input.categories);
-  const map = new Map<string, CategoryStat>();
-  for (const c of input.categories) {
-    if (c.kind !== kind) continue;
+  const list = input.categories.filter((c) => c.kind === kind);
+  const ids = new Set(list.map((c) => c.id));
+  const isMain = (c: Category) => !c.parent_id || !ids.has(c.parent_id);
+
+  const limitOf = (id: string): number | null => {
+    if (kind !== 'expense') return null;
     let limit: number | null = null;
-    if (kind === 'expense') {
-      for (const m of months) {
-        const l = limitFor(input.limits, c.id, m);
-        if (l !== null) limit = (limit ?? 0) + l;
-      }
+    for (const m of months) {
+      const l = limitFor(input.limits, id, m);
+      if (l !== null) limit = (limit ?? 0) + l;
     }
-    map.set(c.id, { category: c, spent: 0, count: 0, limit });
-  }
+    return limit;
+  };
+
+  // what was booked directly on each category (main or sub)
+  const direct = new Map<string, { spent: number; count: number }>();
   for (const t of ofKind(txs, kind)) {
     const c = resolve(t.category_id, kind);
-    const s = c && map.get(c.id);
-    if (!s) continue;
-    s.spent += t.amount_cents;
-    s.count += 1;
+    if (!c) continue;
+    const d = direct.get(c.id) ?? { spent: 0, count: 0 };
+    d.spent += t.amount_cents;
+    d.count += 1;
+    direct.set(c.id, d);
   }
-  return [...map.values()]
-    .filter((s) => s.spent > 0 || s.limit !== null)
-    .sort((a, b) => b.spent - a.spent || (b.limit ?? 0) - (a.limit ?? 0));
+  const own = (c: Category, extra: Partial<CategoryStat> = {}): CategoryStat => ({
+    category: c,
+    spent: direct.get(c.id)?.spent ?? 0,
+    count: direct.get(c.id)?.count ?? 0,
+    limit: limitOf(c.id),
+    subs: [],
+    ...extra,
+  });
+
+  const result: CategoryStat[] = [];
+  for (const main of list.filter(isMain)) {
+    const children = list.filter((c) => c.parent_id === main.id).map((c) => own(c));
+    const self = own(main);
+    const stat: CategoryStat = {
+      ...self,
+      spent: self.spent + sum(children.map((c) => ({ amount_cents: c.spent }))),
+      count: self.count + children.reduce((n, c) => n + c.count, 0),
+    };
+    if (children.length) {
+      stat.subs = children.filter((c) => c.spent > 0 || c.limit !== null);
+      if (self.spent > 0) stat.subs.push({ ...self, limit: null, general: true });
+      stat.subs.sort(bySpent);
+    }
+    if (stat.spent > 0 || stat.limit !== null || stat.subs.some((c) => c.limit !== null)) result.push(stat);
+  }
+  return result.sort(bySpent);
 }
 
 /** Net savings per account in the given transactions (accounts without movement are left out). */
@@ -158,8 +214,70 @@ function accountNets(accounts: SavingsAccount[], txs: Transaction[]): AccountNet
     .sort((a, b) => b.net - a.net);
 }
 
+/**
+ * Everything that moves money in one month (`monthTxs` = all its entries):
+ * what already happened, and what is still coming (monthly items not due yet + entries dated in the future).
+ */
+function monthFlow(input: ReportInput, month: string, monthTxs: Transaction[]) {
+  const done = monthTxs.filter((t) => !isPlanned(t, input.today));
+  const upcoming: UpcomingItem[] = [
+    ...upcomingRecurring(input.recurring, month, input.today).map(({ item, date }) => ({
+      date,
+      kind: item.kind,
+      amount_cents: item.amount_cents,
+      person_id: item.person_id,
+      recurring: item,
+    })),
+    ...monthTxs
+      .filter((t) => isPlanned(t, input.today))
+      .map((t) => ({ date: t.date, kind: t.kind, amount_cents: t.amount_cents, person_id: t.person_id, tx: t })),
+  ].sort((a, b) => a.date.localeCompare(b.date));
+
+  const spent = sum(ofKind(done, 'expense'));
+  const income = sum(ofKind(done, 'income'));
+  const saved = sum(ofKind(done, 'saving'));
+  const upcomingExpenses = sum(ofKind(upcoming, 'expense'));
+  const upcomingSavings = sum(ofKind(upcoming, 'saving'));
+  const expectedIncome = sum(ofKind(upcoming, 'income'));
+  return {
+    done,
+    upcoming,
+    spent,
+    income,
+    saved,
+    upcomingExpenses,
+    upcomingSavings,
+    expectedIncome,
+    /** income (received + expected) − spent − still to pay − savings (made + planned) */
+    net: income + expectedIncome - spent - upcomingExpenses - saved - upcomingSavings,
+  };
+}
+
+/**
+ * Money carried into `month` from the months before: what was left at the end of the previous
+ * month, which itself includes what that month got from the one before, and so on – back to
+ * `carryFrom`, which starts from zero. null when carrying is off or `month` is the first month.
+ */
+export function carriedInto(input: ReportInput, month: string): number | null {
+  if (!input.carryFrom) return null;
+  const first = monthOf(input.carryFrom);
+  if (month <= first) return null;
+  const byMonth = new Map<string, Transaction[]>();
+  for (const t of input.transactions) {
+    const m = monthOf(t.date);
+    if (m < first || m >= month) continue;
+    const list = byMonth.get(m);
+    if (list) list.push(t);
+    else byMonth.set(m, [t]);
+  }
+  let carry = 0;
+  for (let m = first; m < month; m = addMonths(m, 1)) carry += monthFlow(input, m, byMonth.get(m) ?? []).net;
+  return carry;
+}
+
 export interface MonthReport {
   month: string;
+  /** entries that already happened (dated today or earlier) */
   transactions: Transaction[];
   spent: number;
   income: number;
@@ -168,16 +286,24 @@ export interface MonthReport {
   categories: CategoryStat[];
   incomeCategories: CategoryStat[];
   savings: AccountNet[];
-  /** sum of limits / spending in categories that have a limit */
+  /** sum of limits / spending in categories that have a limit (a main category's limit covers its subcategories) */
   budget: { limit: number; spent: number } | null;
   people: PersonStat[];
+  /** monthly items not posted yet + entries dated in the future, by date */
   upcoming: UpcomingItem[];
   upcomingExpenses: number;
   upcomingSavings: number;
   expectedIncome: number;
-  /** income (received + expected) − spent − upcoming bills − savings (made + planned) */
+  /** future-dated expenses only (no monthly items) */
+  plannedExpenses: number;
+  /** left over from the month before (null = carrying is off or this is the first month) */
+  carriedIn: number | null;
+  /** what's left at the end of this month goes into the next one */
+  carriesOver: boolean;
+  /** carried in + income (received + expected) − spent − still to pay − savings (made + planned) */
   leftToSpend: number;
   isCurrent: boolean;
+  isFuture: boolean;
   daysElapsed: number;
   daysInMonth: number;
   /** non-recurring spending per elapsed day */
@@ -192,24 +318,21 @@ export interface MonthReport {
 }
 
 export function monthReport(input: ReportInput, month: string): MonthReport {
-  const txs = input.transactions.filter((t) => monthOf(t.date) === month);
+  const flow = monthFlow(input, month, input.transactions.filter((t) => monthOf(t.date) === month));
+  const txs = flow.done;
   const expenses = ofKind(txs, 'expense');
-  const spent = sum(expenses);
-  const income = sum(ofKind(txs, 'income'));
-  const saved = sum(ofKind(txs, 'saving'));
+  const { spent, income, saved, upcoming, upcomingExpenses, upcomingSavings, expectedIncome } = flow;
   const categories = categoryStats(input, txs, [month], 'expense');
 
-  const limited = categories.filter((c) => c.limit !== null);
+  // a limit on a main category already covers its subcategories; sub-limits only count on their own
+  const limited: CategoryStat[] = [];
+  for (const c of categories) {
+    if (c.limit !== null) limited.push(c);
+    else limited.push(...c.subs.filter((s) => s.limit !== null));
+  }
   const budget = limited.length
     ? { limit: limited.reduce((s, c) => s + (c.limit ?? 0), 0), spent: limited.reduce((s, c) => s + c.spent, 0) }
     : null;
-
-  const upcoming = upcomingRecurring(input.recurring, month, input.today);
-  const upcomingOf = (kind: Recurring['kind']) =>
-    upcoming.filter((u) => u.item.kind === kind).reduce((s, u) => s + u.item.amount_cents, 0);
-  const upcomingExpenses = upcomingOf('expense');
-  const upcomingSavings = upcomingOf('saving');
-  const expectedIncome = upcomingOf('income');
 
   const todayMonth = monthOf(input.today);
   const isCurrent = month === todayMonth;
@@ -234,9 +357,12 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
   const busiestWeekday = byWeekday[maxDay] > 0 ? { day: maxDay, amount: byWeekday[maxDay] } : null;
 
   const prev = addMonths(month, -1);
-  const previousSpent = sum(input.transactions.filter((t) => t.kind === 'expense' && monthOf(t.date) === prev));
+  const previousSpent = sum(
+    input.transactions.filter((t) => t.kind === 'expense' && monthOf(t.date) === prev && !isPlanned(t, input.today)),
+  );
 
   const mostFrequent = categories.reduce<CategoryStat | null>((b, c) => (c.count > (b?.count ?? 0) ? c : b), null);
+  const carriedIn = carriedInto(input, month);
 
   return {
     month,
@@ -253,8 +379,12 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
     upcomingExpenses,
     upcomingSavings,
     expectedIncome,
-    leftToSpend: income + expectedIncome - spent - upcomingExpenses - saved - upcomingSavings,
+    plannedExpenses: sum(upcoming.filter((u) => u.tx && u.kind === 'expense')),
+    carriedIn,
+    carriesOver: input.carryFrom !== null && month >= monthOf(input.carryFrom),
+    leftToSpend: (carriedIn ?? 0) + flow.net,
     isCurrent,
+    isFuture: month > todayMonth,
     daysElapsed,
     daysInMonth: dim,
     dailyAverage,
@@ -301,7 +431,7 @@ export function yearReport(input: ReportInput, year: number): YearReport {
   const months = monthsOfYear(year);
   const todayMonth = monthOf(input.today);
   const elapsed = months.filter((m) => m <= todayMonth);
-  const txs = input.transactions.filter((t) => t.date.startsWith(`${year}-`));
+  const txs = input.transactions.filter((t) => t.date.startsWith(`${year}-`) && !isPlanned(t, input.today));
   const expenses = ofKind(txs, 'expense');
 
   const totals: MonthTotal[] = months.map((month) => {
@@ -375,7 +505,7 @@ export interface SavingsReport {
 
 /** Needs every savings movement ever (not just the loaded years) for correct balances. */
 export function savingsReport(input: ReportInput): SavingsReport {
-  const all = ofKind(input.transactions, 'saving');
+  const all = ofKind(input.transactions, 'saving').filter((t) => !isPlanned(t, input.today));
   const month = monthOf(input.today);
   const year = input.today.slice(0, 4);
   const perPerson = (txs: Transaction[]) => {
