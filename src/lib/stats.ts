@@ -215,8 +215,10 @@ function accountNets(accounts: SavingsAccount[], txs: Transaction[]): AccountNet
 }
 
 /**
- * Everything that moves money in one month (`monthTxs` = all its entries):
- * what already happened, and what is still coming (monthly items not due yet + entries dated in the future).
+ * Everything that moves money in one month (`monthTxs` = all its entries): what already happened,
+ * and what is still coming (monthly items not posted yet + entries dated in the future).
+ * Money still to go out (expenses, savings) only counts from its day on; money still expected
+ * to come in is counted already.
  */
 function monthFlow(input: ReportInput, month: string, monthTxs: Transaction[]) {
   const done = monthTxs.filter((t) => !isPlanned(t, input.today));
@@ -232,12 +234,12 @@ function monthFlow(input: ReportInput, month: string, monthTxs: Transaction[]) {
       .filter((t) => isPlanned(t, input.today))
       .map((t) => ({ date: t.date, kind: t.kind, amount_cents: t.amount_cents, person_id: t.person_id, tx: t })),
   ].sort((a, b) => a.date.localeCompare(b.date));
+  // a monthly item whose day has come counts even if the app hasn't posted it yet
+  const dueNow = upcoming.filter((u) => u.date <= input.today);
 
   const spent = sum(ofKind(done, 'expense'));
   const income = sum(ofKind(done, 'income'));
   const saved = sum(ofKind(done, 'saving'));
-  const upcomingExpenses = sum(ofKind(upcoming, 'expense'));
-  const upcomingSavings = sum(ofKind(upcoming, 'saving'));
   const expectedIncome = sum(ofKind(upcoming, 'income'));
   return {
     done,
@@ -245,11 +247,11 @@ function monthFlow(input: ReportInput, month: string, monthTxs: Transaction[]) {
     spent,
     income,
     saved,
-    upcomingExpenses,
-    upcomingSavings,
+    upcomingExpenses: sum(ofKind(upcoming, 'expense')),
+    upcomingSavings: sum(ofKind(upcoming, 'saving')),
     expectedIncome,
-    /** income (received + expected) − spent − still to pay − savings (made + planned) */
-    net: income + expectedIncome - spent - upcomingExpenses - saved - upcomingSavings,
+    /** income (received + expected) − spent − savings made − what's still to pay but already due */
+    net: income + expectedIncome - spent - saved - sum(ofKind(dueNow, 'expense')) - sum(ofKind(dueNow, 'saving')),
   };
 }
 
@@ -291,8 +293,10 @@ export interface MonthReport {
   people: PersonStat[];
   /** monthly items not posted yet + entries dated in the future, by date */
   upcoming: UpcomingItem[];
+  /** still to pay / put into savings: not taken from leftToSpend until their day */
   upcomingExpenses: number;
   upcomingSavings: number;
+  /** still to come in: already counted in leftToSpend */
   expectedIncome: number;
   /** future-dated expenses only (no monthly items) */
   plannedExpenses: number;
@@ -300,7 +304,7 @@ export interface MonthReport {
   carriedIn: number | null;
   /** what's left at the end of this month goes into the next one */
   carriesOver: boolean;
-  /** carried in + income (received + expected) − spent − still to pay − savings (made + planned) */
+  /** carried in + income (received + expected) − spent − savings made (still to pay waits for its day) */
   leftToSpend: number;
   isCurrent: boolean;
   isFuture: boolean;

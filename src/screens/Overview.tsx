@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useData, useReportInput } from '../data/DataProvider';
-import { monthReport, type CategoryStat, type MonthReport, type PersonStat } from '../lib/stats';
+import { monthReport, type CategoryStat, type MonthReport, type PersonStat, type UpcomingItem } from '../lib/stats';
 import { addMonths, formatDay, formatMonth, formatMonthShort, WEEKDAYS, yearOf } from '../lib/dates';
 import { formatMoney, percent } from '../lib/money';
 import { navigate } from '../lib/router';
@@ -121,7 +121,6 @@ function Hero({ report }: { report: MonthReport }) {
 }
 
 function MoneyFlow({ report, onOpen }: { report: MonthReport; onOpen: (tx: Transaction) => void }) {
-  const { category, account, personName } = useLookups();
   const carried = report.carriedIn ?? 0;
   if (!report.income && !report.expectedIncome && !report.upcoming.length && !carried) {
     return (
@@ -133,6 +132,10 @@ function MoneyFlow({ report, onOpen }: { report: MonthReport; onOpen: (tx: Trans
   }
   const prevName = formatMonth(addMonths(report.month, -1)).split(' ')[0];
   const nextName = formatMonth(addMonths(report.month, 1)).split(' ')[0];
+  // money still to come in is counted already; money still to go out waits for its day
+  const incoming = report.upcoming.filter((u) => u.kind === 'income');
+  const outgoing = report.upcoming.filter((u) => u.kind !== 'income');
+  const past = !report.isCurrent && !report.isFuture;
   return (
     <section className="card">
       <h3>Money flow</h3>
@@ -148,21 +151,22 @@ function MoneyFlow({ report, onOpen }: { report: MonthReport; onOpen: (tx: Trans
           <span className="pos">{formatMoney(report.income)}</span>
         </div>
         {report.expectedIncome > 0 && (
-          <div className="flow-row dim">
-            <span>Still expected</span>
-            <span className="pos">+{formatMoney(report.expectedIncome)}</span>
-          </div>
+          <>
+            <div className="flow-row dim">
+              <span>Still expected</span>
+              <span className="pos">+{formatMoney(report.expectedIncome)}</span>
+            </div>
+            <div className="upcoming-in">
+              {incoming.map((u) => (
+                <UpcomingRow key={u.tx?.id ?? u.recurring!.id} item={u} onOpen={onOpen} />
+              ))}
+            </div>
+          </>
         )}
         <div className="flow-row">
           <span>Spent</span>
           <span>−{formatMoney(report.spent)}</span>
         </div>
-        {report.upcomingExpenses > 0 && (
-          <div className="flow-row dim">
-            <span>Still to pay</span>
-            <span>−{formatMoney(report.upcomingExpenses)}</span>
-          </div>
-        )}
         {report.saved !== 0 && (
           <div className="flow-row">
             <span>{report.saved > 0 ? 'Put into savings' : 'Taken from savings'}</span>
@@ -172,66 +176,82 @@ function MoneyFlow({ report, onOpen }: { report: MonthReport; onOpen: (tx: Trans
             </span>
           </div>
         )}
-        {report.upcomingSavings !== 0 && (
-          <div className="flow-row dim">
-            <span>{report.upcomingSavings > 0 ? 'Savings still planned' : 'Still to take from savings'}</span>
-            <span className="save">
-              {report.upcomingSavings > 0 ? '−' : '+'}
-              {formatMoney(Math.abs(report.upcomingSavings))}
-            </span>
-          </div>
-        )}
         <div className="flow-row flow-total">
-          <span>{report.isCurrent ? 'Left to spend' : report.isFuture ? 'Expected to be left' : 'Balance'}</span>
+          <span>{past ? 'Balance' : 'Left to spend'}</span>
           <span className={report.leftToSpend < 0 ? 'text-danger' : 'pos'}>{formatMoney(report.leftToSpend, { sign: true })}</span>
         </div>
-        {report.carriesOver && !report.isCurrent && !report.isFuture && (
-          <div className="flow-note">carried into {nextName}</div>
-        )}
+        {report.carriesOver && past && <div className="flow-note">carried into {nextName}</div>}
         {report.isFuture && report.expectedIncome === 0 && (
           <div className="flow-hint">
             💡 No income expected yet – salaries added as monthly items (⚙️ → Monthly items) would show up here
           </div>
         )}
       </div>
-      {report.upcoming.length > 0 && (
+      {outgoing.length > 0 && (
         <div className="upcoming">
-          {report.upcoming.map((u) => {
-            const tone = u.kind === 'income' ? 'pos' : u.kind === 'saving' ? 'save' : '';
-            const sign = u.kind === 'income' || u.amount_cents < 0 ? '+' : '−';
-            const name = u.recurring
-              ? u.recurring.name
-              : u.tx!.note ||
-                (u.kind === 'saving'
-                  ? account(u.tx!.savings_account_id)?.name
-                  : category(u.tx!.category_id, u.kind === 'income' ? 'income' : 'expense')?.name);
-            const body = (
+          {report.upcomingExpenses > 0 && (
+            <div className="flow-row upcoming-head">
+              <span>Still to pay</span>
+              <span>−{formatMoney(report.upcomingExpenses)}</span>
+            </div>
+          )}
+          {report.upcomingSavings !== 0 && (
+            <div className="flow-row upcoming-head">
+              <span>{report.upcomingSavings > 0 ? 'Still to put into savings' : 'Still to take from savings'}</span>
+              <span className="save">
+                {report.upcomingSavings > 0 ? '−' : '+'}
+                {formatMoney(Math.abs(report.upcomingSavings))}
+              </span>
+            </div>
+          )}
+          {outgoing.map((u) => (
+            <UpcomingRow key={u.tx?.id ?? u.recurring!.id} item={u} onOpen={onOpen} />
+          ))}
+          <div className="flow-hint">
+            Not taken from Left to spend until its day
+            {outgoing.some((u) => u.tx) && (
               <>
-                {u.recurring ? <IconRepeat /> : <IconClock />}
-                <span className="grow">
-                  {u.kind === 'saving' && '🐷 '}
-                  {name} <span className="dim">· {personName(u.person_id)}</span>
-                </span>
-                <span className="dim">{formatDay(u.date)}</span>
-                <span className={tone}>
-                  {sign}
-                  {formatMoney(Math.abs(u.amount_cents), { whole: true })}
-                </span>
+                {' '}– tap a <IconClock /> entry to mark it paid
               </>
-            );
-            return u.tx ? (
-              <button key={u.tx.id} className="upcoming-row" onClick={() => onOpen(u.tx!)}>
-                {body}
-              </button>
-            ) : (
-              <div key={u.recurring!.id} className="upcoming-row">
-                {body}
-              </div>
-            );
-          })}
+            )}
+          </div>
         </div>
       )}
     </section>
+  );
+}
+
+/** A monthly item not posted yet, or an entry dated in the future (tap to open it). */
+function UpcomingRow({ item: u, onOpen }: { item: UpcomingItem; onOpen: (tx: Transaction) => void }) {
+  const { category, account, personName } = useLookups();
+  const tone = u.kind === 'income' ? 'pos' : u.kind === 'saving' ? 'save' : '';
+  const sign = u.kind === 'income' || u.amount_cents < 0 ? '+' : '−';
+  const name = u.recurring
+    ? u.recurring.name
+    : u.tx!.note ||
+      (u.kind === 'saving'
+        ? account(u.tx!.savings_account_id)?.name
+        : category(u.tx!.category_id, u.kind === 'income' ? 'income' : 'expense')?.name);
+  const body = (
+    <>
+      {u.recurring ? <IconRepeat /> : <IconClock />}
+      <span className="grow">
+        {u.kind === 'saving' && '🐷 '}
+        {name} <span className="dim">· {personName(u.person_id)}</span>
+      </span>
+      <span className="dim">{formatDay(u.date)}</span>
+      <span className={tone}>
+        {sign}
+        {formatMoney(Math.abs(u.amount_cents), { whole: true })}
+      </span>
+    </>
+  );
+  return u.tx ? (
+    <button className="upcoming-row" onClick={() => onOpen(u.tx!)}>
+      {body}
+    </button>
+  ) : (
+    <div className="upcoming-row">{body}</div>
   );
 }
 
@@ -431,7 +451,8 @@ function Income({ report }: { report: MonthReport }) {
 }
 
 function Savings({ report }: { report: MonthReport }) {
-  if (!report.saved && !report.upcomingSavings) return null;
+  const morePlanned = report.upcomingSavings;
+  if (!report.saved && !morePlanned) return null;
   return (
     <section className="card">
       <div className="card-head">
@@ -452,9 +473,7 @@ function Savings({ report }: { report: MonthReport }) {
           </button>
         ))}
       </div>
-      {report.upcomingSavings > 0 && (
-        <p className="small dim">+{formatMoney(report.upcomingSavings)} more planned this month</p>
-      )}
+      {morePlanned > 0 && <p className="small dim">+{formatMoney(morePlanned)} more planned this month</p>}
       {report.saved > 0 && report.income > 0 && (
         <div className="verdict">🐷 {percent(report.saved, report.income)}% of this month's income went into savings</div>
       )}

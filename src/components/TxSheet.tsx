@@ -9,7 +9,7 @@ import { noteSuggestions } from '../lib/search';
 import { navigate } from '../lib/router';
 import { useToast } from './Toast';
 import { DateInput, Field, Segmented, Sheet, Toggle, useLookups } from './ui';
-import { IconClock, IconLock } from './Icons';
+import { IconCheck, IconClock, IconLock } from './Icons';
 
 export interface NewEntryDefaults {
   date?: string;
@@ -83,6 +83,13 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const pickError = showErrors && (isSaving ? !accountId : !categoryId);
   const dateError = showErrors && !date;
   const planned = Boolean(date) && date > todayISO();
+  // a saved entry dated in the future can be marked as done: it then moves to today and counts
+  const canMarkDone = canEdit && !isNew && tx.date > todayISO();
+  const done = isSaving
+    ? { button: 'Mark as done today', toast: 'Done – counted from today' }
+    : kind === 'income'
+      ? { button: 'Mark as received today', toast: 'Received – counted from today' }
+      : { button: 'Mark as paid today', toast: 'Paid – counted from today' };
 
   // notes used before (new expenses and incomes only); tapping one also picks its usual category
   const suggestions =
@@ -101,8 +108,10 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
     if (!personPicked) setPerson(k === 'saving' ? data.userId : defaultPerson(cats[k === 'income' ? 'income' : 'expense']));
   };
 
-  async function save() {
-    if (cents === null || (isSaving ? !accountId : !categoryId) || !date) {
+  /** markDone: save it dated today (a planned entry that was paid / received) */
+  async function save(markDone = false) {
+    const when = markDone ? todayISO() : date;
+    if (cents === null || (isSaving ? !accountId : !categoryId) || !when) {
       setShowErrors(true);
       return;
     }
@@ -112,7 +121,7 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
       category_id: categoryId,
       savings_account_id: isSaving ? accountId : null,
       person_id: person === 'shared' ? null : person,
-      date,
+      date: when,
       note: note.trim() || null,
     };
     setBusy(true);
@@ -130,7 +139,7 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
         else toast(isSaving ? (direction === 'in' ? 'Added to savings' : 'Taken from savings') : kind === 'income' ? 'Income added' : 'Expense added');
       } else {
         await data.updateTransaction(tx.id, input);
-        toast('Saved');
+        toast(markDone ? done.toast : 'Saved');
       }
       onClose();
     } catch (e) {
@@ -244,7 +253,7 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
                   <span className="text-danger">Pick a date</span>
                 ) : planned ? (
                   <span className="planned-hint">
-                    <IconClock /> Planned – counts from that day on
+                    <IconClock /> Planned – not counted until that day
                   </span>
                 ) : undefined
               }
@@ -293,6 +302,12 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
             />
           )}
         </fieldset>
+
+        {canMarkDone && (
+          <button type="button" className="btn btn-ok btn-block mark-done" onClick={() => save(true)} disabled={busy}>
+            <IconCheck /> {done.button}
+          </button>
+        )}
 
         {!isNew && (
           <p className="meta">

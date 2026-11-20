@@ -215,7 +215,8 @@ describe('savings in reports', () => {
     expect(m.spent).toBe(2000);
     expect(m.saved).toBe(22000);
     expect(m.upcomingSavings).toBe(10000);
-    expect(m.leftToSpend).toBe(200000 - 2000 - 22000 - 10000);
+    // the monthly 100 € on the 20th only counts from that day on
+    expect(m.leftToSpend).toBe(200000 - 2000 - 22000);
     expect(m.savings.map((s) => [s.account.id, s.net])).toEqual([
       ['vacation', 17000],
       ['emergency', 5000],
@@ -288,7 +289,7 @@ describe('entries dated in the future', () => {
     savingsAccounts: [account('vacation')],
   });
 
-  it('are planned, not spent, until their day comes', () => {
+  it('are still to pay, not spent, and not taken from what is left to spend until their day comes', () => {
     const m = monthReport(data, '2026-11');
     expect(m.spent).toBe(2000);
     expect(m.transactions.map((t) => t.date)).toEqual(['2026-11-05']);
@@ -298,15 +299,18 @@ describe('entries dated in the future', () => {
     expect(m.upcomingSavings).toBe(4000);
     expect(m.upcoming.map((u) => u.date)).toEqual(['2026-11-25', '2026-11-27', '2026-11-30']);
     expect(m.upcoming[1].tx?.note).toBe('Kobasice');
-    expect(m.leftToSpend).toBe(10000 - 2000 - 23000 - 4000);
+    // expected income is counted already, money still to go out isn't
+    expect(m.leftToSpend).toBe(10000 - 2000);
     expect(m.categories.find((c) => c.category.id === 'food')?.spent).toBe(2000);
     expect(m.people.find((p) => p.id === 'ana')?.spent).toBe(0);
   });
 
-  it('count normally once the day has come', () => {
+  it('count normally once the day has come (or once marked paid, which moves them to today)', () => {
     const m = monthReport({ ...data, today: '2026-11-27' }, '2026-11');
     expect(m.spent).toBe(25000);
     expect(m.plannedExpenses).toBe(0);
+    expect(m.upcomingSavings).toBe(0);
+    expect(m.leftToSpend).toBe(10000 - 25000 - 4000);
     expect(m.upcoming.map((u) => u.date)).toEqual(['2026-11-30']);
   });
 
@@ -315,6 +319,8 @@ describe('entries dated in the future', () => {
     expect(dec.isFuture).toBe(true);
     expect(dec.spent).toBe(0);
     expect(dec.upcomingExpenses).toBe(5000);
+    expect(dec.plannedExpenses).toBe(5000);
+    expect(dec.leftToSpend).toBe(0);
     expect(yearReport(data, 2026).spent).toBe(2000);
     expect(savingsReport(data).total).toBe(0);
   });
@@ -348,11 +354,19 @@ describe('carrying leftover money into the next month', () => {
     const nov = monthReport(data, '2026-11');
     expect(nov.carriedIn).toBe(70000);
     expect(nov.income).toBe(200000); // not counted as income
-    expect(nov.leftToSpend).toBe(70000 + 200000 - 30000 - 10000 - 60000);
+    // neither the monthly item on the 25th nor the entry planned for the 28th is taken yet
+    expect(nov.upcomingExpenses).toBe(60000 + 10000);
+    expect(nov.leftToSpend).toBe(70000 + 200000 - 30000);
+  });
+
+  it('takes what was still to pay once its day has come (even before the monthly item is posted)', () => {
+    expect(monthReport({ ...data, today: '2026-11-25' }, '2026-11').leftToSpend).toBe(70000 + 200000 - 30000 - 60000);
+    expect(monthReport({ ...data, today: '2026-11-28' }, '2026-11').leftToSpend).toBe(70000 + 200000 - 30000 - 10000 - 60000);
   });
 
   it('keeps rolling: a future month starts with what this month is expected to end with', () => {
-    expect(carriedInto(data, '2026-12')).toBe(70000 + 200000 - 30000 - 10000 - 60000);
+    expect(carriedInto(data, '2026-12')).toBe(70000 + 200000 - 30000);
+    expect(carriedInto({ ...data, today: '2026-11-28' }, '2026-12')).toBe(70000 + 200000 - 30000 - 10000 - 60000);
   });
 
   it('carries a negative month as well', () => {
@@ -363,7 +377,7 @@ describe('carrying leftover money into the next month', () => {
   it('is off without a start month', () => {
     const nov = monthReport({ ...data, carryFrom: null }, '2026-11');
     expect(nov.carriedIn).toBeNull();
-    expect(nov.leftToSpend).toBe(200000 - 30000 - 10000 - 60000);
+    expect(nov.leftToSpend).toBe(200000 - 30000);
   });
 });
 
