@@ -3,9 +3,20 @@ import { formatMoney } from '../lib/money';
 import { formatDay, todayISO } from '../lib/dates';
 import { isPlanned } from '../lib/stats';
 import { CatIcon, useLookups } from './ui';
-import { IconClock, IconCloudOff, IconLock, IconRepeat } from './Icons';
+import { IconCheck, IconClock, IconCloudOff, IconLock, IconRepeat } from './Icons';
 
-export function TxRow({ tx, onClick, showDate }: { tx: Transaction; onClick?: () => void; showDate?: boolean }) {
+/** `select`: the row is in a multi-select list – 'disabled' rows can't be picked. */
+export function TxRow({
+  tx,
+  onClick,
+  showDate,
+  select,
+}: {
+  tx: Transaction;
+  onClick?: () => void;
+  showDate?: boolean;
+  select?: 'on' | 'off' | 'disabled';
+}) {
   const { category, parent, account, personName, personColor } = useLookups();
   const isSaving = tx.kind === 'saving';
   const cat = isSaving ? undefined : category(tx.category_id, tx.kind === 'income' ? 'income' : 'expense');
@@ -20,7 +31,14 @@ export function TxRow({ tx, onClick, showDate }: { tx: Transaction; onClick?: ()
   const tone = tx.kind === 'income' ? 'pos' : isSaving ? 'save' : '';
 
   return (
-    <button className={`tx ${planned ? 'tx-planned' : ''}`} onClick={onClick}>
+    <button
+      className={`tx ${planned ? 'tx-planned' : ''}`}
+      onClick={onClick}
+      disabled={select === 'disabled'}
+      role={select ? 'checkbox' : undefined}
+      aria-checked={select ? select === 'on' : undefined}
+    >
+      {select && <span className={`tx-check ${select === 'on' ? 'tx-check-on' : ''}`}>{select === 'on' && <IconCheck />}</span>}
       <CatIcon category={icon} />
       <span className="tx-main">
         <span className="tx-title">

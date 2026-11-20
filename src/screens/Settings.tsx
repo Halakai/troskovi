@@ -1,13 +1,14 @@
-import { useState } from 'react';
-import { useData } from '../data/DataProvider';
+import { useEffect, useState } from 'react';
+import { useData, type ExportData } from '../data/DataProvider';
+import { backupJson, entriesCsv, saveFile } from '../lib/export';
 import { errorMessage } from '../supabase';
 import type { ThemePref } from '../lib/theme';
 import { navigate } from '../lib/router';
 import { BUILD_TIME } from '../lib/pwa';
 import { useToast } from '../components/Toast';
-import { addMonths, currentMonth, formatMonth, monthOf, monthStart } from '../lib/dates';
+import { addMonths, currentMonth, formatDMY, formatMonth, monthOf, monthStart, todayISO } from '../lib/dates';
 import { Avatar, ColorPicker, Field, Segmented, Sheet, Toggle, TopBar } from '../components/ui';
-import { IconRight } from '../components/Icons';
+import { IconDownload, IconRight } from '../components/Icons';
 
 interface Props {
   theme: ThemePref;
@@ -18,7 +19,7 @@ interface Props {
 export function Settings({ theme, setTheme, onSignOut }: Props) {
   const data = useData();
   const me = data.me!;
-  const [sheet, setSheet] = useState<'password' | 'profile' | 'carry' | null>(null);
+  const [sheet, setSheet] = useState<'password' | 'profile' | 'carry' | 'export' | null>(null);
   const carryFrom = data.settings.carry_from;
 
   return (
@@ -99,6 +100,19 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
         </section>
       )}
 
+      <section className="card">
+        <h3>Your data</h3>
+        <div className="menu">
+          <button className="menu-item" onClick={() => setSheet('export')}>
+            <span>
+              💾 Export & backup
+              <span className="dim small block">All entries for Excel, or a full backup file</span>
+            </span>
+            <IconRight />
+          </button>
+        </div>
+      </section>
+
       <button className="btn btn-ghost btn-block" onClick={onSignOut}>
         Sign out
       </button>
@@ -123,6 +137,7 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
       {sheet === 'password' && <PasswordSheet onClose={() => setSheet(null)} />}
       {sheet === 'profile' && <MyProfileSheet onClose={() => setSheet(null)} />}
       {sheet === 'carry' && <CarrySheet onClose={() => setSheet(null)} />}
+      {sheet === 'export' && <ExportSheet onClose={() => setSheet(null)} />}
     </>
   );
 }
@@ -280,6 +295,70 @@ function CarrySheet({ onClose }: { onClose: () => void }) {
           {busy ? 'Saving…' : 'Save'}
         </button>
       </form>
+    </Sheet>
+  );
+}
+
+function ExportSheet({ onClose }: { onClose: () => void }) {
+  const { fetchEverything } = useData();
+  const toast = useToast();
+  const [data, setData] = useState<ExportData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // load everything first: iPhones only open the share sheet right after a tap, not after a download
+  useEffect(() => {
+    let alive = true;
+    fetchEverything()
+      .then((d) => alive && setData(d))
+      .catch((e) => alive && setError(errorMessage(e)));
+    return () => {
+      alive = false;
+    };
+  }, [fetchEverything]);
+
+  async function save(kind: 'csv' | 'json') {
+    if (!data) return;
+    const day = todayISO();
+    const result =
+      kind === 'csv'
+        ? await saveFile(`troskovi-${day}.csv`, 'text/csv', entriesCsv(data))
+        : await saveFile(`troskovi-backup-${day}.json`, 'application/json', backupJson(data));
+    if (result === 'downloaded') toast('Saved to your downloads');
+  }
+
+  const first = data?.transactions.reduce<string | null>((m, t) => (!m || t.date < m ? t.date : m), null);
+
+  return (
+    <Sheet title="Export & backup" onClose={onClose}>
+      <div className="stack">
+        <p className="small dim">
+          Everything is kept safely online, but a copy of your own never hurts – and the table opens in Excel, Google
+          Sheets or Python.
+        </p>
+        <div className="card-tip notice">
+          {error ? (
+            <span className="text-danger">{error}</span>
+          ) : data ? (
+            <>
+              <b>{data.transactions.length}</b> entries{first && ` since ${formatDMY(first)}`}, {data.categories.length}{' '}
+              categories, {data.recurring.length} monthly items – ready.
+            </>
+          ) : (
+            'Getting everything from the server…'
+          )}
+        </div>
+        <button className="btn btn-primary btn-block" disabled={!data} onClick={() => save('csv')}>
+          <IconDownload /> Entries as a table (CSV for Excel)
+        </button>
+        <button className="btn btn-ghost btn-block" disabled={!data} onClick={() => save('json')}>
+          <IconDownload /> Full backup (JSON)
+        </button>
+        <p className="small dim">
+          The table has one row per entry: date, type, amount, category, subcategory, person, note… If Excel puts
+          everything in one column, open it with Data → From Text/CSV. The backup has everything – also categories,
+          limits, monthly items and savings accounts.
+        </p>
+      </div>
     </Sheet>
   );
 }

@@ -16,6 +16,20 @@ interface Snapshot {
   /** transactions of every year listed in `years`, plus all savings movements (needed for balances) */
   transactions: Transaction[];
   years: number[];
+  /** date of the oldest entry – tells search and charts which years exist */
+  firstDate: string | null;
+}
+
+/** Everything in the database, for the backup download. */
+export interface ExportData {
+  exported_at: string;
+  profiles: Profile[];
+  categories: Category[];
+  limits: CategoryLimit[];
+  savingsAccounts: SavingsAccount[];
+  recurring: Recurring[];
+  settings: AppSettings;
+  transactions: Transaction[];
 }
 
 const EMPTY: Snapshot = {
@@ -27,6 +41,7 @@ const EMPTY: Snapshot = {
   settings: { carry_from: null },
   transactions: [],
   years: [],
+  firstDate: null,
 };
 
 export type CategoryDraft = Pick<Category, 'name' | 'emoji' | 'color' | 'owner_id' | 'kind' | 'parent_id' | 'default_shared'> & {
@@ -66,6 +81,10 @@ interface DataContextValue extends Snapshot {
 
   addTransaction: (input: TransactionInput, opts?: { repeatMonthly?: boolean; recurringName?: string }) => Promise<'saved' | 'queued'>;
   updateTransaction: (id: string, patch: Partial<TransactionInput>) => Promise<void>;
+  /** puts entries into another category; returns how many were moved (others' entries need the admin) */
+  moveTransactions: (ids: string[], categoryId: string) => Promise<number>;
+  /** every year's data straight from the server */
+  fetchEverything: () => Promise<ExportData>;
   deleteTransaction: (id: string) => Promise<void>;
 
   saveCategory: (draft: CategoryDraft) => Promise<Category>;
@@ -181,13 +200,14 @@ function txRow(t: Transaction) {
   return { id, kind, amount_cents, category_id, savings_account_id, person_id, date, note, recurring_id, created_by };
 }
 
-/** One year of entries, or (`savings`) every savings movement ever – balances need the full history. */
-async function fetchTransactions(where: { year: number } | { savings: true }): Promise<Transaction[]> {
+/** One year of entries, every savings movement ever (balances need the full history), or everything. */
+async function fetchTransactions(where: { year: number } | { savings: true } | { all: true }): Promise<Transaction[]> {
   const PAGE = 1000;
   const rows: Transaction[] = [];
   for (let from = 0; ; from += PAGE) {
     let q = supabase.from('transactions').select('*');
-    q = 'year' in where ? q.gte('date', `${where.year}-01-01`).lte('date', `${where.year}-12-31`) : q.eq('kind', 'saving');
+    if ('year' in where) q = q.gte('date', `${where.year}-01-01`).lte('date', `${where.year}-12-31`);
+    else if ('savings' in where) q = q.eq('kind', 'saving');
     const { data, error } = await q
       .order('date')
       .order('id')
@@ -225,6 +245,7 @@ function hydrate(userId: string): Snapshot {
     savingsAccounts: (cached.savingsAccounts ?? []).map((a) => normSavings(a as unknown as Row)),
     recurring: (cached.recurring ?? []).map((r) => normRecurring(r as unknown as Row)),
     settings: normSettings(cached.settings as unknown as Row),
+    firstDate: cached.firstDate ?? null,
     years,
     transactions: (cached.transactions ?? [])
       .map((t) => normTx(t as unknown as Row))
@@ -337,7 +358,11 @@ export function DataProvider({ userId, children }: { userId: string; children: R
         ]);
         const thisYear = new Date().getFullYear();
         const years = [...new Set([thisYear, ...snapRef.current.years])];
-        const perYear = await Promise.all(years.map(fetchYear));
+        const [perYear, first] = await Promise.all([
+          Promise.all(years.map(fetchYear)),
+          supabase.from('transactions').select('date').order('date', { ascending: true }).limit(1),
+        ]);
+        if (first.error) throw first.error;
 
         setSnap((s) => {
           let next: Snapshot = {
@@ -348,6 +373,7 @@ export function DataProvider({ userId, children }: { userId: string; children: R
             savingsAccounts: bySortOrder(savingsAccounts),
             recurring,
             settings: settings[0] ?? EMPTY.settings,
+            firstDate: (first.data[0]?.date as string | undefined) ?? null,
           };
           years.forEach((y, i) => (next = replaceYear(next, y, perYear[i], since)));
           next = { ...next, transactions: replaceWhere(next, (t) => t.kind === 'saving', savingsMovements, since) };
@@ -522,6 +548,59 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     },
     [putTx],
   );
+
+  const moveTransactions = useCallback<DataContextValue['moveTransactions']>(
+    async (ids, categoryId) => {
+      // entries still waiting to upload are simply changed on this phone
+      const queued = new Set(outboxRef.current.filter((t) => ids.includes(t.id)).map((t) => t.id));
+      if (queued.size) setOutbox((o) => o.map((t) => (queued.has(t.id) ? { ...t, category_id: categoryId } : t)));
+      const rest = ids.filter((id) => !queued.has(id));
+      const before = snapRef.current.transactions.filter((t) => rest.includes(t.id));
+      before.forEach((t) => putTx({ ...t, category_id: categoryId }));
+      let moved = queued.size;
+      const answered = new Set<string>(); // ids the server has already dealt with
+      try {
+        for (let i = 0; i < rest.length; i += 100) {
+          const chunk = rest.slice(i, i + 100);
+          const { data, error } = await supabase.from('transactions').update({ category_id: categoryId }).in('id', chunk).select();
+          if (error) throw new Error(errorMessage(error));
+          data.forEach((r) => putTx(normTx(r)));
+          moved += data.length;
+          // rows the database didn't change (someone else's entries) go back to how they were
+          const done = new Set(data.map((r) => r.id as string));
+          before.filter((t) => chunk.includes(t.id) && !done.has(t.id)).forEach(putTx);
+          chunk.forEach((id) => answered.add(id));
+        }
+      } catch (e) {
+        before.filter((t) => !answered.has(t.id)).forEach(putTx);
+        throw e;
+      }
+      return moved;
+    },
+    [putTx],
+  );
+
+  const fetchEverything = useCallback<DataContextValue['fetchEverything']>(async () => {
+    const [profiles, categories, limits, savingsAccounts, recurring, settings, transactions] = await Promise.all([
+      fetchTable('profiles', (r) => r as unknown as Profile),
+      fetchTable('categories', normCategory),
+      fetchTable('category_limits', normLimit),
+      fetchTable('savings_accounts', normSavings),
+      fetchTable('recurring', normRecurring),
+      fetchTable('app_settings', normSettings),
+      fetchTransactions({ all: true }),
+    ]);
+    return {
+      exported_at: new Date().toISOString(),
+      profiles,
+      categories: bySortOrder(categories),
+      limits,
+      savingsAccounts: bySortOrder(savingsAccounts),
+      recurring,
+      settings: settings[0] ?? EMPTY.settings,
+      transactions,
+    };
+  }, []);
 
   const deleteTransaction = useCallback<DataContextValue['deleteTransaction']>(
     async (id) => {
@@ -722,6 +801,8 @@ export function DataProvider({ userId, children }: { userId: string; children: R
     yearLoading: (y) => loadingYears.includes(y),
     addTransaction,
     updateTransaction,
+    moveTransactions,
+    fetchEverything,
     deleteTransaction,
     saveCategory,
     deleteCategory,

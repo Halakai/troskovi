@@ -36,6 +36,21 @@ export default defineConfig({
           { src: 'pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
           { src: 'maskable-icon-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
+        // Android: long-press the app icon. iPhones ignore this (and nothing else depends on it).
+        shortcuts: [
+          {
+            name: 'Add expense',
+            short_name: 'Expense',
+            url: `${base}?add=expense`,
+            icons: [{ src: 'shortcut-expense.png', sizes: '192x192', type: 'image/png' }],
+          },
+          {
+            name: 'Add income',
+            short_name: 'Income',
+            url: `${base}?add=income`,
+            icons: [{ src: 'shortcut-income.png', sizes: '192x192', type: 'image/png' }],
+          },
+        ],
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,ico,webmanifest}'],

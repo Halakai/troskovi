@@ -100,3 +100,19 @@ export const IconDown = (p: P) => (
     <path d="m6 9 6 6 6-6" />
   </svg>
 );
+export const IconSearch = (p: P) => (
+  <svg {...base({ width: 18, height: 18, ...p })}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.5-3.5" />
+  </svg>
+);
+export const IconCheck = (p: P) => (
+  <svg {...base({ width: 16, height: 16, strokeWidth: 3, ...p })}>
+    <path d="m5 12 5 5 9-10" />
+  </svg>
+);
+export const IconDownload = (p: P) => (
+  <svg {...base({ width: 18, height: 18, ...p })}>
+    <path d="M12 3v12m-5-5 5 5 5-5M4 21h16" />
+  </svg>
+);

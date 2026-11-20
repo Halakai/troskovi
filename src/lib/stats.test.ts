@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Category, CategoryKind, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction } from '../types';
-import { carriedInto, limitFor, monthReport, savingsReport, upcomingRecurring, yearReport, type ReportInput } from './stats';
+import { carriedInto, categoryTrend, limitFor, monthReport, savingsReport, upcomingRecurring, yearReport, type ReportInput } from './stats';
 
 const profile = (id: string, name: string, created: string): Profile => ({
   id,
@@ -425,5 +425,29 @@ describe('subcategories', () => {
     expect(yEat.spent).toBe(7200);
     expect(yEat.limit).toBe(10000 * 11);
     expect(yEat.subs.find((s) => s.category.id === 'wolt')?.limit).toBe(3000 * 11);
+  });
+});
+
+describe('categoryTrend', () => {
+  it("adds up a main category with its subcategories per month, with that month's limit", () => {
+    const data = input({
+      today: '2026-11-20',
+      categories: [...categories, category('eat'), category('wolt', 'expense', false, 'eat')],
+      transactions: [
+        tx('2026-09-03', 1000, 'david', 'eat'),
+        tx('2026-10-03', 2000, 'david', 'wolt'),
+        tx('2026-10-09', 500, 'ana', 'eat'),
+        tx('2026-10-10', 9999, 'ana', 'food'),
+        tx('2026-11-25', 7000, 'ana', 'wolt'), // planned
+        income('2026-10-01', 5000, 'ana', 'eat'), // other list
+      ],
+      limits: [{ category_id: 'eat', effective_from: '2026-10-01', amount_cents: 3000 }],
+    });
+    expect(categoryTrend(data, 'eat', ['2026-09', '2026-10', '2026-11'])).toEqual([
+      { month: '2026-09', spent: 1000, count: 1, limit: null },
+      { month: '2026-10', spent: 2500, count: 2, limit: 3000 },
+      { month: '2026-11', spent: 0, count: 0, limit: 3000 },
+    ]);
+    expect(categoryTrend(data, 'wolt', ['2026-10']).map((p) => p.spent)).toEqual([2000]);
   });
 });

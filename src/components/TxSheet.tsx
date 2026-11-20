@@ -5,6 +5,7 @@ import type { Category, CategoryKind, Kind, SavingsAccount, Transaction, Transac
 import { centsToInput, parseAmount } from '../lib/money';
 import { formatDay, ordinal, todayISO } from '../lib/dates';
 import { isMainIn } from '../lib/categories';
+import { noteSuggestions } from '../lib/search';
 import { navigate } from '../lib/router';
 import { useToast } from './Toast';
 import { DateInput, Field, Segmented, Sheet, Toggle, useLookups } from './ui';
@@ -53,6 +54,8 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const [personPicked, setPersonPicked] = useState(!isNew);
   const [date, setDate] = useState(tx?.date ?? defaults.date ?? todayISO());
   const [note, setNote] = useState(tx?.note ?? '');
+  /** a suggestion was just tapped – hide the list until the note is typed again */
+  const [noteChosen, setNoteChosen] = useState(false);
   const [repeat, setRepeat] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
@@ -80,6 +83,14 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const pickError = showErrors && (isSaving ? !accountId : !categoryId);
   const dateError = showErrors && !date;
   const planned = Boolean(date) && date > todayISO();
+
+  // notes used before (new expenses and incomes only); tapping one also picks its usual category
+  const suggestions =
+    isNew && !isSaving && !noteChosen
+      ? noteSuggestions(data.allTransactions, { kind: catKind, categoryId, query: note }).filter(
+          (s) => !s.categoryId || pickableCats.some((c) => c.id === s.categoryId),
+        )
+      : [];
 
   const pickCategory = (id: string) => {
     setCats((c) => ({ ...c, [catKind]: id }));
@@ -245,11 +256,33 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
                 className="input"
                 value={note}
                 maxLength={200}
-                onChange={(e) => setNote(e.target.value)}
+                onChange={(e) => {
+                  setNote(e.target.value);
+                  setNoteChosen(false);
+                }}
                 placeholder={isSaving ? 'e.g. bonus' : kind === 'income' ? 'e.g. September' : 'e.g. Lidl'}
               />
             </Field>
           </div>
+
+          {suggestions.length > 0 && (
+            <div className="note-suggest" aria-label="Notes used before">
+              {suggestions.map((sug) => (
+                <button
+                  type="button"
+                  key={sug.note}
+                  className="chip"
+                  onClick={() => {
+                    setNote(sug.note);
+                    setNoteChosen(true);
+                    if (sug.categoryId && sug.categoryId !== categoryId) pickCategory(sug.categoryId);
+                  }}
+                >
+                  {category(sug.categoryId, catKind)?.emoji} {sug.note}
+                </button>
+              ))}
+            </div>
+          )}
 
           {isNew && canRepeat && (
             <Toggle
@@ -298,7 +331,7 @@ const GRID_COLUMNS = 4; // keep in sync with .cat-grid in styles.css
  * Main categories as tiles. A main category with subcategories opens a row of
  * subcategory chips right below its tile row; picking one is optional.
  */
-function CategoryPicker({
+export function CategoryPicker({
   categories,
   value,
   onChange,

@@ -412,7 +412,7 @@ function Categories({ report }: { report: MonthReport }) {
           </div>
         </div>
       )}
-      <CategoryList stats={report.categories} onPick={(id) => navigate(`/history?cat=${id}`)} />
+      <CategoryList stats={report.categories} onPick={(id) => navigate(`/category?id=${id}`)} />
     </section>
   );
 }
@@ -425,7 +425,7 @@ function Income({ report }: { report: MonthReport }) {
         <h3>Income</h3>
         <span className="pos small">+{formatMoney(report.income, { whole: true })}</span>
       </div>
-      <CategoryList stats={report.incomeCategories} onPick={(id) => navigate(`/history?kind=income&cat=${id}`)} />
+      <CategoryList stats={report.incomeCategories} onPick={(id) => navigate(`/category?id=${id}`)} />
     </section>
   );
 }

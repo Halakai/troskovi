@@ -397,6 +397,39 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
   };
 }
 
+export interface TrendPoint {
+  month: string;
+  /** spent (expense list) or received (income list); a main category includes its subcategories */
+  spent: number;
+  count: number;
+  /** null = no limit that month (always null for income) */
+  limit: number | null;
+}
+
+/** One category month by month (entries dated in the future don't count yet). */
+export function categoryTrend(input: ReportInput, categoryId: string, months: string[]): TrendPoint[] {
+  const cat = input.categories.find((c) => c.id === categoryId);
+  if (!cat) return months.map((month) => ({ month, spent: 0, count: 0, limit: null }));
+  const resolve = categoryResolver(input.categories);
+  const ids = new Set([cat.id, ...input.categories.filter((c) => c.parent_id === cat.id).map((c) => c.id)]);
+  const wanted = new Set(months);
+  const per = new Map(months.map((m) => [m, { spent: 0, count: 0 }]));
+  for (const t of input.transactions) {
+    const m = monthOf(t.date);
+    if (t.kind !== cat.kind || !wanted.has(m) || isPlanned(t, input.today)) continue;
+    const c = resolve(t.category_id, cat.kind);
+    if (!c || !ids.has(c.id)) continue;
+    const p = per.get(m)!;
+    p.spent += t.amount_cents;
+    p.count += 1;
+  }
+  return months.map((month) => ({
+    month,
+    ...per.get(month)!,
+    limit: cat.kind === 'expense' ? limitFor(input.limits, cat.id, month) : null,
+  }));
+}
+
 export interface MonthTotal {
   month: string;
   spent: number;

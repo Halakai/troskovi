@@ -104,7 +104,7 @@ export function Year({ year, setYear, openMonth }: Props) {
           <section className="card">
             <h3>Categories</h3>
             <p className="small dim card-note">Limits are added up for the {report.elapsedMonths} months so far.</p>
-            <CategoryList stats={report.categories} />
+            <CategoryList stats={report.categories} onPick={(id) => navigate(`/category?id=${id}&from=/year`)} />
           </section>
 
           {hasIncome && (
@@ -113,7 +113,7 @@ export function Year({ year, setYear, openMonth }: Props) {
                 <h3>Income</h3>
                 <span className="pos small">+{formatMoney(report.income, { whole: true })}</span>
               </div>
-              <CategoryList stats={report.incomeCategories} />
+              <CategoryList stats={report.incomeCategories} onPick={(id) => navigate(`/category?id=${id}&from=/year`)} />
             </section>
           )}
 

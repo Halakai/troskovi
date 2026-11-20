@@ -19,6 +19,7 @@ import { Settings } from './screens/Settings';
 import { CategoriesSettings } from './screens/CategoriesSettings';
 import { RecurringSettings } from './screens/RecurringSettings';
 import { UsersSettings } from './screens/UsersSettings';
+import { CategoryDetail } from './screens/CategoryDetail';
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -86,12 +87,24 @@ function Splash({ text, action }: { text?: string; action?: { label: string; run
   );
 }
 
+/** Opened from a home-screen shortcut (Android): "?add=expense" / "?add=income" starts a new entry. Read once. */
+const LAUNCH_ADD = (() => {
+  const add = new URLSearchParams(window.location.search).get('add');
+  if (!add) return null;
+  window.history.replaceState(null, '', window.location.pathname + window.location.hash); // not again on reload
+  return add === 'expense' || add === 'income' ? add : null;
+})();
+
+function sheetFromLaunchUrl(): { tx: null; defaults: NewEntryDefaults } | null {
+  return LAUNCH_ADD ? { tx: null, defaults: { date: todayISO(), kind: LAUNCH_ADD } } : null;
+}
+
 function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref) => void }) {
   const data = useData();
   const [path, params] = useRoute();
   const [month, setMonth] = useState(currentMonth);
   const [year, setYear] = useState(() => new Date().getFullYear());
-  const [sheet, setSheet] = useState<{ tx: Transaction | null; defaults?: NewEntryDefaults } | null>(null);
+  const [sheet, setSheet] = useState<{ tx: Transaction | null; defaults?: NewEntryDefaults } | null>(sheetFromLaunchUrl);
 
   if (!data.ready) {
     return data.syncError ? (
@@ -129,6 +142,9 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
           }}
         />
       );
+      break;
+    case '/category':
+      screen = <CategoryDetail params={params} viewMonth={month} setMonth={setMonth} />;
       break;
     case '/settings':
       screen = <Settings theme={theme} setTheme={setTheme} onSignOut={signOut} />;
