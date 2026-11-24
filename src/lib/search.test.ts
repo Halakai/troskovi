@@ -13,6 +13,8 @@ const tx = (note: string | null, category: string, date = '2026-11-01', extra: P
   date,
   note,
   recurring_id: null,
+  balance_check_id: null,
+  write_off: false,
   created_by: 'david',
   created_at: `${date}T10:00:00Z`,
   updated_at: `${date}T10:00:00Z`,

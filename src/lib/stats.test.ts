@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import type { Category, CategoryKind, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction } from '../types';
-import { carriedInto, categoryTrend, limitFor, monthReport, savingsReport, upcomingRecurring, yearReport, type ReportInput } from './stats';
+import type { BalanceCheck, Category, CategoryKind, CategoryLimit, Profile, Recurring, SavingsAccount, Transaction } from '../types';
+import {
+  carriedInto,
+  categoryTrend,
+  limitFor,
+  moneySummary,
+  monthReport,
+  savingsReport,
+  topCategories,
+  topSpender,
+  upcomingRecurring,
+  yearReport,
+  type ReportInput,
+} from './stats';
 
 const profile = (id: string, name: string, created: string): Profile => ({
   id,
@@ -53,6 +65,8 @@ const tx = (date: string, cents: number, person: string | null, cat = 'food', ex
   date,
   note: null,
   recurring_id: null,
+  balance_check_id: null,
+  write_off: false,
   created_by: person ?? 'david',
   created_at: `${date}T10:00:00Z`,
   updated_at: `${date}T10:00:00Z`,
@@ -97,6 +111,7 @@ const input = (over: Partial<ReportInput>): ReportInput => ({
   savingsAccounts: [],
   recurring: [],
   profiles,
+  checks: [],
   carryFrom: null,
   today: '2026-10-04',
   ...over,
@@ -190,6 +205,38 @@ describe('monthReport', () => {
     expect(report.noSpendDays).toBe(1);
     expect(report.biggest?.amount_cents).toBe(2000);
     expect(report.projected).toBe(50000 + Math.round((3500 / 4) * 31));
+  });
+});
+
+describe('the short version for the home page', () => {
+  const many = (...amounts: number[]) =>
+    monthReport(
+      input({
+        categories: [...categories, ...amounts.map((_, i) => category(`c${i}`))],
+        transactions: amounts.map((a, i) => tx('2026-10-01', a, 'david', `c${i}`)),
+      }),
+      '2026-10',
+    ).categories;
+
+  it('keeps the biggest categories and adds up the others', () => {
+    const { top, rest } = topCategories(many(100, 700, 600, 500, 400, 300, 200), 5);
+    expect(top.map((c) => c.spent)).toEqual([700, 600, 500, 400, 300]);
+    expect(rest).toEqual({ count: 2, spent: 300 });
+  });
+
+  it('never says "1 more"', () => {
+    const { top, rest } = topCategories(many(600, 500, 400, 300, 200, 100), 5);
+    expect(top).toHaveLength(6);
+    expect(rest).toEqual({ count: 0, spent: 0 });
+  });
+
+  it('says who spent more', () => {
+    const people = (david: number, ana: number) =>
+      monthReport(input({ transactions: [tx('2026-10-01', david, 'david'), tx('2026-10-01', ana, 'ana'), tx('2026-10-01', 99999, null)] }), '2026-10')
+        .people;
+    expect(topSpender(people(1000, 9000), 20000)).toEqual({ name: 'Ana', gap: 8000, even: false });
+    expect(topSpender(people(9000, 9300), 20000)).toMatchObject({ even: true });
+    expect(topSpender(people(9000, 8000).filter((p) => p.id !== 'ana'), 20000)).toBeNull();
   });
 });
 
@@ -378,6 +425,85 @@ describe('carrying leftover money into the next month', () => {
     const nov = monthReport({ ...data, carryFrom: null }, '2026-11');
     expect(nov.carriedIn).toBeNull();
     expect(nov.leftToSpend).toBe(200000 - 30000);
+  });
+});
+
+describe('balance checks', () => {
+  const check = (id: string, date: string, real: number, extra: Partial<BalanceCheck> = {}): BalanceCheck => ({
+    id,
+    date,
+    whole_day: false,
+    checked_at: `${date}T14:00:00Z`,
+    real_cents: real,
+    adjust_cents: 0,
+    joined: false,
+    created_by: 'david',
+    created_at: `${date}T14:00:00Z`,
+    ...extra,
+  });
+  const data = input({
+    today: '2026-11-20',
+    carryFrom: '2026-10-01',
+    transactions: [
+      income('2026-10-01', 300000, 'david'),
+      tx('2026-10-10', 250000, null),
+      income('2026-11-01', 200000, 'david'),
+      tx('2026-11-12', 30000, 'ana'),
+    ],
+    recurring: [recurring({ kind: 'income', name: 'Salary', amount_cents: 90000, category_id: 'salary', day_of_month: 25, posted_through: '2026-10-01' })],
+    checks: [check('c1', '2026-10-25', 80000), check('c2', '2026-11-15', 245680)],
+  });
+
+  it('what is left follows the real accounts; the expected salary is not on them yet', () => {
+    const nov = monthReport(data, '2026-11');
+    expect(nov.carriedIn).toBe(80000); // 50000 in the app + 30000 the app didn't know about
+    expect(nov.corrections).toEqual({ start: 0, accounts: 0, toSettle: -4320, small: 0 });
+    expect(nov.onAccounts).toBe(245680);
+    expect(nov.leftToSpend).toBe(245680 + 90000);
+    expect(nov.spent).toBe(30000); // not spending until it's known what it was
+    expect(monthReport(data, '2026-10')).toMatchObject({ corrections: { start: 30000 }, leftToSpend: 80000, onAccounts: null });
+  });
+
+  it('finding what it was changes what was spent, but not what is left', () => {
+    const late = tx('2026-11-13', 3000, 'ana', 'food', { created_at: '2026-11-18T10:00:00Z' });
+    const off = tx('2026-11-15', 1320, null, 'other', { balance_check_id: 'c2', write_off: true, created_at: '2026-11-18T10:05:00Z' });
+    const nov = monthReport({ ...data, transactions: [...data.transactions, late, off] }, '2026-11');
+    expect(nov.corrections.toSettle).toBe(0);
+    expect(nov.leftToSpend).toBe(245680 + 90000);
+    expect(nov.spent).toBe(30000 + 3000 + 1320);
+  });
+
+  it('spending after the check is taken from what is left', () => {
+    const after = tx('2026-11-16', 1000, 'ana');
+    expect(monthReport({ ...data, transactions: [...data.transactions, after] }, '2026-11').onAccounts).toBe(244680);
+  });
+
+  it('a write-off counts as spent, but not in the fun facts about days and the biggest expense', () => {
+    const off = tx('2026-11-15', 99000, null, 'other', { balance_check_id: 'c2', write_off: true });
+    const nov = monthReport({ ...data, transactions: [...data.transactions, off] }, '2026-11');
+    expect(nov.spent).toBe(129000);
+    expect(nov.biggest?.amount_cents).toBe(30000);
+    expect(nov.noSpendDays).toBe(19);
+  });
+
+  it('in three numbers: what it started with, what came in and what went out', () => {
+    const nov = monthReport(data, '2026-11');
+    // the salary still to come is in, the money that's missing is out
+    expect(moneySummary(nov)).toEqual({ start: 80000, cameIn: 290000, wentOut: 34320 });
+    expect(moneySummary(monthReport(data, '2026-10'))).toEqual({ start: 30000, cameIn: 300000, wentOut: 250000 });
+    // a surplus comes in, savings go out or come in
+    const more = monthReport({ ...data, checks: [check('c1', '2026-10-25', 80000), check('c2', '2026-11-15', 255000)] }, '2026-11');
+    expect(moneySummary(more)).toEqual({ start: 80000, cameIn: 295000, wentOut: 30000 });
+    const pot = monthReport({ ...data, transactions: [...data.transactions, saving('2026-11-16', 5000, null, 'x')] }, '2026-11');
+    expect(moneySummary(pot)).toEqual({ start: 80000, cameIn: 290000, wentOut: 39320 });
+    const back = monthReport({ ...data, transactions: [...data.transactions, saving('2026-11-16', -5000, null, 'x')] }, '2026-11');
+    expect(moneySummary(back)).toEqual({ start: 80000, cameIn: 295000, wentOut: 34320 });
+  });
+
+  it('change nothing when months are not connected', () => {
+    const nov = monthReport({ ...data, carryFrom: null }, '2026-11');
+    expect(nov.leftToSpend).toBe(200000 + 90000 - 30000);
+    expect(nov.onAccounts).toBeNull();
   });
 });
 

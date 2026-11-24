@@ -8,10 +8,12 @@ import { currentMonth, defaultDateFor, todayISO, yearOf } from './lib/dates';
 import { takeUpdatedFlag, useAutoUpdate } from './lib/pwa';
 import type { Transaction } from './types';
 import { ToastProvider, useToast } from './components/Toast';
+import { CheckPrompt } from './components/CheckPrompt';
 import { TxSheet, type NewEntryDefaults } from './components/TxSheet';
 import { IconChart, IconHome, IconList, IconPiggy, IconPlus } from './components/Icons';
 import { Login } from './screens/Login';
 import { Overview } from './screens/Overview';
+import { MonthDetail } from './screens/MonthDetail';
 import { History } from './screens/History';
 import { Savings } from './screens/Savings';
 import { Year } from './screens/Year';
@@ -20,6 +22,8 @@ import { CategoriesSettings } from './screens/CategoriesSettings';
 import { RecurringSettings } from './screens/RecurringSettings';
 import { UsersSettings } from './screens/UsersSettings';
 import { CategoryDetail } from './screens/CategoryDetail';
+import { CheckForm, Checks, CheckWeek } from './screens/Checks';
+import { CheckSettings } from './screens/CheckSettings';
 
 export function App() {
   const [session, setSession] = useState<Session | null | undefined>(undefined);
@@ -119,6 +123,10 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
 
   const open = (tx: Transaction) => setSheet({ tx });
   const add = (defaults: NewEntryDefaults) => setSheet({ tx: null, defaults: { date: todayISO(), ...defaults } });
+  const changeMonth = (m: string) => {
+    setMonth(m);
+    setYear(yearOf(m));
+  };
   let screen;
   // what + adds: screens with the month selector start new entries in the month being viewed
   let plusDefaults = (): NewEntryDefaults => ({ date: todayISO() });
@@ -143,8 +151,25 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
         />
       );
       break;
+    case '/month':
+      plusDefaults = () => ({ date: defaultDateFor(month) });
+      screen = <MonthDetail month={month} setMonth={changeMonth} params={params} />;
+      break;
     case '/category':
       screen = <CategoryDetail params={params} viewMonth={month} setMonth={setMonth} />;
+      break;
+    case '/checks':
+      screen = <Checks />;
+      break;
+    case '/checks/new':
+    case '/checks/edit':
+      screen = <CheckForm params={params} />;
+      break;
+    case '/checks/week':
+      screen = <CheckWeek params={params} onAdd={add} onOpen={open} />;
+      break;
+    case '/settings/check':
+      screen = <CheckSettings />;
       break;
     case '/settings':
       screen = <Settings theme={theme} setTheme={setTheme} onSignOut={signOut} />;
@@ -161,14 +186,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
     default:
       plusDefaults = () => ({ date: defaultDateFor(month) });
       screen = (
-        <Overview
-          month={month}
-          setMonth={(m) => {
-            setMonth(m);
-            setYear(yearOf(m));
-          }}
-          onOpen={open}
-        />
+        <Overview month={month} setMonth={changeMonth} onOpen={open} />
       );
   }
 
@@ -183,7 +201,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
     <div className="app">
       <main>{screen}</main>
       <nav className="tabbar">
-        {tab('/', 'Month', <IconHome />, path === '/')}
+        {tab('/', 'Month', <IconHome />, path === '/' || path === '/month')}
         {tab('/history', 'History', <IconList />, path === '/history')}
         <button className="fab" onClick={() => setSheet({ tx: null, defaults: plusDefaults() })} aria-label="Add entry">
           <IconPlus width={28} height={28} />
@@ -192,6 +210,7 @@ function Shell({ theme, setTheme }: { theme: ThemePref; setTheme: (t: ThemePref)
         {tab('/year', 'Year', <IconChart />, path === '/year')}
       </nav>
       {sheet && <TxSheet tx={sheet.tx} defaults={sheet.defaults} onClose={() => setSheet(null)} />}
+      <CheckPrompt blocked={sheet !== null || path.startsWith('/checks/')} />
     </div>
   );
 }

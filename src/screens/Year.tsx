@@ -5,7 +5,7 @@ import { formatMonth, formatMonthShort } from '../lib/dates';
 import { formatMoney, percent } from '../lib/money';
 import { navigate } from '../lib/router';
 import { CatIcon, Empty, TopBar, YearSwitcher, useLookups } from '../components/ui';
-import { CategoryList, PeopleBlock } from './Overview';
+import { CategoryList, PeopleBlock } from '../components/report';
 
 interface Props {
   year: number;

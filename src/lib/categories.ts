@@ -18,6 +18,10 @@ export function categoryTree(list: Category[]): { category: Category; depth: 0 |
     ]);
 }
 
+/** Where a balance check's write-offs go. It's made when it's first needed and isn't offered for normal entries. */
+export const UNACCOUNTED = 'Unaccounted';
+export const isUnaccounted = (c: Category) => c.owner_id === null && c.name === UNACCOUNTED;
+
 /** The id itself plus all its subcategories – for "show everything in this category" filters. */
 export function withSubcategories(categories: Category[], id: string): Set<string> {
   return new Set([id, ...categories.filter((c) => c.parent_id === id).map((c) => c.id)]);

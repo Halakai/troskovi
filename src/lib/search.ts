@@ -28,7 +28,7 @@ export interface NoteSuggestion {
 /**
  * Notes used before, for the note field of a new entry. With an empty query: the notes
  * most used in the picked category. While typing: notes containing the text, the ones
- * that start with it first. Monthly items' automatic entries are left out.
+ * that start with it first. Monthly items' automatic entries and write-offs are left out.
  */
 export function noteSuggestions(
   transactions: Transaction[],
@@ -39,7 +39,7 @@ export function noteSuggestions(
 
   const groups = new Map<string, { note: string; last: string; count: number; inCategory: number; perCategory: Map<string | null, { n: number; last: string }> }>();
   for (const t of transactions) {
-    if (t.kind !== opts.kind || !t.note?.trim() || t.recurring_id) continue;
+    if (t.kind !== opts.kind || !t.note?.trim() || t.recurring_id || t.write_off) continue;
     const key = normalizeText(t.note);
     let g = groups.get(key);
     if (!g) groups.set(key, (g = { note: t.note.trim(), last: '', count: 0, inCategory: 0, perCategory: new Map() }));

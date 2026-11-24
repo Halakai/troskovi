@@ -122,6 +122,42 @@ create table if not exists public.app_settings (
   updated_at timestamptz not null default now()
 );
 
+-- Where the everyday money really is: everyone's bank account, cash, …
+-- (savings accounts are separate and not part of this). owner_id NULL = shared.
+create table if not exists public.wallets (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null check (length(trim(name)) between 1 and 40),
+  emoji      text not null default '🏦',
+  owner_id   uuid references public.profiles(id) on delete cascade,
+  archived   boolean not null default false,
+  sort_order integer not null default 100,
+  created_by uuid default auth.uid() references public.profiles(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+
+-- Balance checks: what is really on the accounts, to compare with the app.
+-- The difference itself is never stored. The app works it out from the balances
+-- and the entries, so an entry added or corrected later also corrects the check.
+create table if not exists public.balance_checks (
+  id           uuid primary key default gen_random_uuid(),
+  date         date not null,                        -- local day the balances are from
+  whole_day    boolean not null default false,       -- true: from the end of that day; false: from checked_at
+  checked_at   timestamptz not null default now(),
+  real_cents   integer not null default 0,           -- all accounts together (the single ones only admins see)
+  adjust_cents integer not null default 0,           -- accounts that joined (+) or dropped out (−) since the check before
+  joined       boolean not null default false,       -- counted as one with the check after it
+  created_by   uuid not null default auth.uid() references public.profiles(id) on delete restrict,
+  created_at   timestamptz not null default now()
+);
+create unique index if not exists balance_checks_one_per_past_day on public.balance_checks (date) where whole_day;
+
+create table if not exists public.balance_check_items (
+  check_id     uuid not null references public.balance_checks(id) on delete cascade,
+  wallet_id    uuid not null references public.wallets(id) on delete restrict,
+  amount_cents integer not null,
+  primary key (check_id, wallet_id)
+);
+
 -- ---------------------------------------------------------------------
 --  Upgrades for databases created by an older version of this file
 -- ---------------------------------------------------------------------
@@ -131,6 +167,15 @@ alter table public.categories   add column if not exists parent_id uuid referenc
 alter table public.categories   add column if not exists default_shared boolean not null default false;
 alter table public.recurring    add column if not exists savings_account_id uuid references public.savings_accounts(id) on delete cascade;
 alter table public.transactions add column if not exists savings_account_id uuid references public.savings_accounts(id) on delete restrict;
+-- balance_check_id: happened before that check, whatever its date or time says (e.g. it was found missing there)
+-- write_off: the part of a check's difference nobody could explain
+alter table public.transactions add column if not exists balance_check_id uuid references public.balance_checks(id) on delete set null;
+alter table public.transactions add column if not exists write_off boolean not null default false;
+create index if not exists transactions_balance_check_idx on public.transactions (balance_check_id) where balance_check_id is not null;
+-- when the weekly balance check is due (weekday 0 = Sunday, NULL = never), and when it was last skipped
+alter table public.app_settings add column if not exists check_weekday smallint default 0 check (check_weekday between 0 and 6);
+alter table public.app_settings add column if not exists check_time text not null default '14:00' check (check_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$');
+alter table public.app_settings add column if not exists check_skipped_at timestamptz;
 
 -- ---------------------------------------------------------------------
 --  Constraints that changed over time (dropped and re-added on every run)
@@ -318,11 +363,25 @@ drop trigger if exists categories_before_delete on public.categories;
 create trigger categories_before_delete before delete on public.categories
   for each row execute function public.tg_categories_before_delete();
 
+-- Everyone gets a bank account for the balance check.
+create or replace function public.tg_profiles_after_insert() returns trigger
+language plpgsql security definer set search_path = '' as $$
+begin
+  insert into public.wallets (name, owner_id, sort_order) values ('Bank account', new.id, 10);
+  return null;
+end $$;
+
+drop trigger if exists profiles_after_insert on public.profiles;
+create trigger profiles_after_insert after insert on public.profiles
+  for each row execute function public.tg_profiles_after_insert();
+
 -- ---------------------------------------------------------------------
 --  Row level security
 --    * everyone who has an active profile sees everything
 --    * anyone can add; normal users edit only what they added
 --    * only the admin deletes transactions
+--    * only admins do balance checks and write-offs; what's on each single
+--      account is for admins too, everyone else sees just the total
 -- ---------------------------------------------------------------------
 
 alter table public.profiles         enable row level security;
@@ -332,6 +391,9 @@ alter table public.savings_accounts enable row level security;
 alter table public.recurring        enable row level security;
 alter table public.transactions     enable row level security;
 alter table public.app_settings     enable row level security;
+alter table public.wallets             enable row level security;
+alter table public.balance_checks      enable row level security;
+alter table public.balance_check_items enable row level security;
 
 -- profiles: read-only from the client, changed only through admin functions
 drop policy if exists profiles_select on public.profiles;
@@ -413,12 +475,12 @@ create policy transactions_select on public.transactions for select to authentic
 
 drop policy if exists transactions_insert on public.transactions;
 create policy transactions_insert on public.transactions for insert to authenticated
-  with check (public.is_member() and created_by = auth.uid());
+  with check (public.is_member() and created_by = auth.uid() and (not write_off or public.is_admin()));
 
 drop policy if exists transactions_update on public.transactions;
 create policy transactions_update on public.transactions for update to authenticated
   using (public.is_admin() or (public.is_member() and created_by = auth.uid()))
-  with check (public.is_admin() or (public.is_member() and created_by = auth.uid()));
+  with check (public.is_admin() or (public.is_member() and created_by = auth.uid() and not write_off));
 
 drop policy if exists transactions_delete on public.transactions;
 create policy transactions_delete on public.transactions for delete to authenticated
@@ -432,6 +494,23 @@ create policy app_settings_select on public.app_settings for select to authentic
 drop policy if exists app_settings_update on public.app_settings;
 create policy app_settings_update on public.app_settings for update to authenticated
   using (public.is_member()) with check (public.is_member());
+
+-- balance check: accounts are set up by admins; checks are written only through the functions below
+drop policy if exists wallets_select on public.wallets;
+create policy wallets_select on public.wallets for select to authenticated
+  using (public.is_member());
+
+drop policy if exists wallets_write on public.wallets;
+create policy wallets_write on public.wallets for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+drop policy if exists balance_checks_select on public.balance_checks;
+create policy balance_checks_select on public.balance_checks for select to authenticated
+  using (public.is_member());
+
+drop policy if exists balance_check_items_select on public.balance_check_items;
+create policy balance_check_items_select on public.balance_check_items for select to authenticated
+  using (public.is_admin());
 
 -- ---------------------------------------------------------------------
 --  User management (all usernames / passwords live in auth.users)
@@ -616,20 +695,131 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------------
+--  Balance checks
+-- ---------------------------------------------------------------------
+
+-- Internal: works out adjust_cents of every check. An account that shows up for the first time
+-- brings its balance with it, and one that is no longer listed takes its last balance along –
+-- neither of them is money that went missing. Joined checks are skipped.
+create or replace function public._recalc_checks() returns void
+language plpgsql security definer set search_path = '' as $$
+begin
+  -- the newest check has none after it to be joined with
+  update public.balance_checks set joined = false
+   where joined and id = (select id from public.balance_checks order by date desc, whole_day desc, checked_at desc, id desc limit 1);
+
+  with chain as (
+    select id, lag(id) over (order by date, whole_day, checked_at, id) as prev
+      from public.balance_checks where not joined
+  ), calc as (
+    select c.id,
+           case when c.prev is null then 0 else
+             coalesce((select sum(i.amount_cents) from public.balance_check_items i
+                        where i.check_id = c.id
+                          and not exists (select 1 from public.balance_check_items p
+                                           where p.check_id = c.prev and p.wallet_id = i.wallet_id)), 0)
+           - coalesce((select sum(p.amount_cents) from public.balance_check_items p
+                        where p.check_id = c.prev
+                          and not exists (select 1 from public.balance_check_items i
+                                           where i.check_id = c.id and i.wallet_id = p.wallet_id)), 0)
+           end as adjust
+      from chain c
+  )
+  update public.balance_checks b set adjust_cents = calc.adjust
+    from calc where calc.id = b.id and b.adjust_cents <> calc.adjust;
+end $$;
+
+-- Saves a check (p_id NULL = new) with the balance of every account:
+-- p_items = [{"wallet_id": …, "amount_cents": …}, …].
+-- p_due: when the weekly check became due – if another admin has already done that one, theirs counts.
+-- p_whole_day: balances from the end of a past day (typed in from a bank statement).
+create or replace function public.save_balance_check(
+  p_id uuid, p_date date, p_whole_day boolean, p_items jsonb, p_due timestamptz default null
+) returns uuid
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_id   uuid := p_id;
+  v_date date := p_date;
+  v_by   text;
+begin
+  if not public.is_admin() then raise exception 'Only an admin can do the balance check'; end if;
+  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then
+    raise exception 'Enter the balance of at least one account';
+  end if;
+  lock table public.balance_checks in share row exclusive mode;   -- two admins at the same moment
+
+  if v_id is null then
+    if p_whole_day then
+      if v_date is null or v_date > current_date then raise exception 'Pick a day that is already over'; end if;
+      if exists (select 1 from public.balance_checks where whole_day and date = v_date) then
+        raise exception 'There is already a check for the end of that day';
+      end if;
+    else
+      if p_due is not null then
+        select p.display_name into v_by
+          from public.balance_checks c join public.profiles p on p.id = c.created_by
+         where not c.whole_day and c.checked_at >= p_due
+         order by c.checked_at limit 1;
+        if found then raise exception 'Already done – % filled it in', v_by; end if;
+      end if;
+      -- the client sends its local date; don't trust it beyond normal timezone skew
+      if v_date is null or abs(v_date - current_date) > 1 then v_date := current_date; end if;
+    end if;
+    insert into public.balance_checks (date, whole_day) values (v_date, coalesce(p_whole_day, false)) returning id into v_id;
+  else
+    if not exists (select 1 from public.balance_checks where id = v_id) then
+      raise exception 'This check no longer exists';
+    end if;
+    delete from public.balance_check_items where check_id = v_id;
+  end if;
+
+  insert into public.balance_check_items (check_id, wallet_id, amount_cents)
+  select v_id, (x ->> 'wallet_id')::uuid, (x ->> 'amount_cents')::integer from jsonb_array_elements(p_items) x;
+  update public.balance_checks
+     set real_cents = (select sum(amount_cents) from public.balance_check_items where check_id = v_id)
+   where id = v_id;
+  perform public._recalc_checks();
+  return v_id;
+end $$;
+
+-- Deletes a check and its write-offs. Entries found missing there stay and count by their date again.
+create or replace function public.delete_balance_check(p_id uuid) returns void
+language plpgsql security definer set search_path = '' as $$
+begin
+  if not public.is_admin() then raise exception 'Only an admin can delete a balance check'; end if;
+  delete from public.transactions where balance_check_id = p_id and write_off;
+  delete from public.balance_checks where id = p_id;
+  perform public._recalc_checks();
+end $$;
+
+-- Counts checks as one with the check after them (their differences cancelled out), or separates them again.
+create or replace function public.join_balance_checks(p_ids uuid[], p_joined boolean) returns void
+language plpgsql security definer set search_path = '' as $$
+begin
+  if not public.is_admin() then raise exception 'Only an admin can do that'; end if;
+  update public.balance_checks set joined = p_joined where id = any (p_ids);
+  perform public._recalc_checks();
+end $$;
+
+-- ---------------------------------------------------------------------
 --  Privileges
 -- ---------------------------------------------------------------------
 
 revoke all on public.profiles, public.categories, public.category_limits, public.savings_accounts,
-              public.recurring, public.transactions, public.app_settings from anon;
+              public.recurring, public.transactions, public.app_settings,
+              public.wallets, public.balance_checks, public.balance_check_items from anon;
+revoke all on public.balance_checks, public.balance_check_items from authenticated;   -- read-only, see above
+grant select on public.balance_checks, public.balance_check_items to authenticated;
 grant select on public.profiles to authenticated;
 grant select, update on public.app_settings to authenticated;
 grant select, insert, update, delete on public.categories, public.category_limits, public.savings_accounts,
-                                        public.recurring, public.transactions to authenticated;
+                                        public.recurring, public.transactions, public.wallets to authenticated;
 
 revoke execute on function public._create_user(text, text, text, boolean, text) from public, anon, authenticated;
 revoke execute on function public._email_for(text) from public, anon, authenticated;
 revoke execute on function public._check_username(text) from public, anon, authenticated;
 revoke execute on function public._check_password(text) from public, anon, authenticated;
+revoke execute on function public._recalc_checks() from public, anon, authenticated;
 
 revoke execute on function public.is_member() from public, anon;
 revoke execute on function public.is_admin() from public, anon;
@@ -639,6 +829,9 @@ revoke execute on function public.admin_set_password(uuid, text) from public, an
 revoke execute on function public.admin_delete_user(uuid) from public, anon;
 revoke execute on function public.change_my_password(text, text) from public, anon;
 revoke execute on function public.apply_recurring(date) from public, anon;
+revoke execute on function public.save_balance_check(uuid, date, boolean, jsonb, timestamptz) from public, anon;
+revoke execute on function public.delete_balance_check(uuid) from public, anon;
+revoke execute on function public.join_balance_checks(uuid[], boolean) from public, anon;
 
 grant execute on function public.is_member() to authenticated;
 grant execute on function public.is_admin() to authenticated;
@@ -648,6 +841,9 @@ grant execute on function public.admin_set_password(uuid, text) to authenticated
 grant execute on function public.admin_delete_user(uuid) to authenticated;
 grant execute on function public.change_my_password(text, text) to authenticated;
 grant execute on function public.apply_recurring(date) to authenticated;
+grant execute on function public.save_balance_check(uuid, date, boolean, jsonb, timestamptz) to authenticated;
+grant execute on function public.delete_balance_check(uuid) to authenticated;
+grant execute on function public.join_balance_checks(uuid[], boolean) to authenticated;
 
 -- ---------------------------------------------------------------------
 --  Realtime: push every change to all open apps instantly
@@ -657,7 +853,8 @@ do $$
 declare
   t text;
 begin
-  foreach t in array array['profiles', 'categories', 'category_limits', 'savings_accounts', 'recurring', 'transactions', 'app_settings'] loop
+  foreach t in array array['profiles', 'categories', 'category_limits', 'savings_accounts', 'recurring', 'transactions', 'app_settings',
+                           'wallets', 'balance_checks', 'balance_check_items'] loop
     if not exists (select 1 from pg_publication_tables
                     where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t) then
       execute format('alter publication supabase_realtime add table public.%I', t);
@@ -708,3 +905,14 @@ on conflict (id) do nothing;
 -- First admin account: david / admin  (change the password in the app!)
 select public._create_user('david', 'admin', 'David', true, '#3b82f6')
 where not exists (select 1 from public.profiles);
+
+-- Accounts for the balance check: one per person plus shared cash. New people get theirs from the
+-- trigger on profiles. (Nothing is added back once there are accounts or checks.)
+insert into public.wallets (name, owner_id, sort_order)
+select 'Bank account', p.id, 10 from public.profiles p
+where p.active and not exists (select 1 from public.wallets);
+
+insert into public.wallets (name, emoji, sort_order)
+select 'Cash', '💵', 90
+where not exists (select 1 from public.wallets where owner_id is null)
+  and not exists (select 1 from public.balance_checks);

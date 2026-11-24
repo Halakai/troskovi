@@ -9,7 +9,8 @@ A shared monthly expense tracker for two people. It's an installable web app (PW
 - Savings accounts (e.g. "Emergency fund", "Vacation"), each with an optional goal and a starting balance. Money put into savings doesn't count as spending, but it does lower "left to spend". Taking money out raises it again.
 - Monthly limits per expense category. A limit change applies from the current month on, so older months keep their old limits.
 - Monthly items for rent, loans, subscriptions, salaries and savings. Each one is added automatically on its day of the month. Until then it counts as *expected*, so a salary that arrives mid-month is already included in "left to spend".
-- Monthly report: total spent vs budget, money flow, who spent what, a fair split of shared costs, categories with limits, income by category, savings, and fun stats
+- Weekly balance check: from Sunday 14:00 the app asks the admins (the first one to do it counts) what's really on everyone's accounts and in cash, and compares that with what it expects. A difference goes to **To settle**: it's counted in "left to spend" right away, but it isn't spending until you find the missing entry or write it off to **Unaccounted**. Each week shows only its own difference, and late or corrected entries settle it by themselves. Savings accounts aren't part of it.
+- Home shows the essentials of the month: what's left to spend, the biggest categories, and one line each about the rest. A tap opens that topic in full: total spent vs budget, every category with its limit, who spent what with a fair split of shared costs, income by category, savings, and fun facts
 - Yearly report: month-by-month chart, people, expense and income categories, savings per account, and highlights
 - History browsable by month, with filters for person, type (expense / income / savings) and category or account
 - Roles: the **admin** creates accounts, can edit or delete anything, and can reset passwords. Other users can add entries and edit the ones they added, and they can change their own password.
@@ -25,7 +26,8 @@ React + TypeScript + Vite · Supabase (Postgres, Auth, Realtime) · vite-plugin-
 supabase/schema.sql      the whole database: tables, row-level security, admin functions, seed data
 src/data/DataProvider    loading, realtime sync, offline queue, all writes
 src/lib/stats.ts         monthly and yearly report math (unit-tested)
-src/screens/             Month, History, Year, Settings (+ Categories, Monthly items, Accounts)
+src/lib/balance.ts       balance check math (unit-tested)
+src/screens/             Month, History, Savings, Year, Balance check, Settings (+ Categories, Monthly items, Accounts)
 ```
 
 ## Setup

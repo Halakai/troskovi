@@ -21,6 +21,8 @@ export function useRoute(): [string, URLSearchParams] {
   return route;
 }
 
-export function navigate(to: string) {
-  window.location.hash = to;
+/** `replace`: without a step of its own for the phone's back button */
+export function navigate(to: string, opts: { replace?: boolean } = {}) {
+  if (opts.replace) window.location.replace(`#${to}`);
+  else window.location.hash = to;
 }

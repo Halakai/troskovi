@@ -1,5 +1,6 @@
 // Pure report calculations (no React, no network) – easy to test.
-import type { Category, CategoryKind, CategoryLimit, Kind, Profile, Recurring, SavingsAccount, Transaction } from '../types';
+import type { BalanceCheck, Category, CategoryKind, CategoryLimit, Kind, Profile, Recurring, SavingsAccount, Transaction } from '../types';
+import { balancePeriods, correctionsByMonth, correctionTotal, NO_CORRECTIONS, type Corrections } from './balance';
 import { addMonths, daysInMonth, monthOf, monthsOfYear, monthStart, parseISODate, recurringDate } from './dates';
 
 export interface ReportInput {
@@ -9,6 +10,8 @@ export interface ReportInput {
   savingsAccounts: SavingsAccount[];
   recurring: Recurring[];
   profiles: Profile[];
+  /** what was really on the accounts – what's left follows these */
+  checks: BalanceCheck[];
   /** YYYY-MM-01: leftover money carries into the next month from this month on (null = off) */
   carryFrom: string | null;
   /** local YYYY-MM-DD */
@@ -255,12 +258,15 @@ function monthFlow(input: ReportInput, month: string, monthTxs: Transaction[]) {
   };
 }
 
+/** Per month: what the balance checks add to (or take from) what's left. */
+const checkCorrections = (input: ReportInput) => correctionsByMonth(balancePeriods(input));
+
 /**
  * Money carried into `month` from the months before: what was left at the end of the previous
  * month, which itself includes what that month got from the one before, and so on – back to
  * `carryFrom`, which starts from zero. null when carrying is off or `month` is the first month.
  */
-export function carriedInto(input: ReportInput, month: string): number | null {
+export function carriedInto(input: ReportInput, month: string, corrections = checkCorrections(input)): number | null {
   if (!input.carryFrom) return null;
   const first = monthOf(input.carryFrom);
   if (month <= first) return null;
@@ -273,7 +279,9 @@ export function carriedInto(input: ReportInput, month: string): number | null {
     else byMonth.set(m, [t]);
   }
   let carry = 0;
-  for (let m = first; m < month; m = addMonths(m, 1)) carry += monthFlow(input, m, byMonth.get(m) ?? []).net;
+  for (let m = first; m < month; m = addMonths(m, 1)) {
+    carry += monthFlow(input, m, byMonth.get(m) ?? []).net + correctionTotal(corrections.get(m) ?? NO_CORRECTIONS);
+  }
   return carry;
 }
 
@@ -304,8 +312,12 @@ export interface MonthReport {
   carriedIn: number | null;
   /** what's left at the end of this month goes into the next one */
   carriesOver: boolean;
-  /** carried in + income (received + expected) − spent − savings made (still to pay waits for its day) */
+  /** from this month's balance checks */
+  corrections: Corrections;
+  /** carried in + income (received + expected) − spent − savings made (still to pay waits for its day) + corrections */
   leftToSpend: number;
+  /** current month only: what should be on the accounts right now (null when carrying is off) */
+  onAccounts: number | null;
   isCurrent: boolean;
   isFuture: boolean;
   daysElapsed: number;
@@ -344,19 +356,21 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
   const daysElapsed = month < todayMonth ? dim : isCurrent ? Number(input.today.slice(8, 10)) : 0;
 
   const variable = expenses.filter((t) => !t.recurring_id);
+  // a write-off is money that went on something, but nobody knows on what or when
+  const known = variable.filter((t) => !t.write_off);
   const variableSpent = sum(variable);
   const dailyAverage = daysElapsed ? Math.round(variableSpent / daysElapsed) : 0;
   const projected = isCurrent ? Math.round(spent - variableSpent + upcomingExpenses + (variableSpent / daysElapsed) * dim) : null;
 
-  const pool = variable.length ? variable : expenses;
+  const pool = known.length ? known : expenses;
   const biggest = pool.reduce<Transaction | null>((b, t) => (!b || t.amount_cents > b.amount_cents ? t : b), null);
 
-  const spendDays = new Set(variable.map((t) => Number(t.date.slice(8, 10))));
+  const spendDays = new Set(known.map((t) => Number(t.date.slice(8, 10))));
   let noSpendDays = 0;
   for (let d = 1; d <= daysElapsed; d++) if (!spendDays.has(d)) noSpendDays++;
 
   const byWeekday = new Array(7).fill(0);
-  for (const t of variable) byWeekday[parseISODate(t.date).getDay()] += t.amount_cents;
+  for (const t of known) byWeekday[parseISODate(t.date).getDay()] += t.amount_cents;
   const maxDay = byWeekday.indexOf(Math.max(...byWeekday));
   const busiestWeekday = byWeekday[maxDay] > 0 ? { day: maxDay, amount: byWeekday[maxDay] } : null;
 
@@ -366,7 +380,10 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
   );
 
   const mostFrequent = categories.reduce<CategoryStat | null>((b, c) => (c.count > (b?.count ?? 0) ? c : b), null);
-  const carriedIn = carriedInto(input, month);
+  const perMonth = checkCorrections(input);
+  const corrections = perMonth.get(month) ?? NO_CORRECTIONS;
+  const carriedIn = carriedInto(input, month, perMonth);
+  const leftToSpend = (carriedIn ?? 0) + flow.net + correctionTotal(corrections);
 
   return {
     month,
@@ -386,7 +403,9 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
     plannedExpenses: sum(upcoming.filter((u) => u.tx && u.kind === 'expense')),
     carriedIn,
     carriesOver: input.carryFrom !== null && month >= monthOf(input.carryFrom),
-    leftToSpend: (carriedIn ?? 0) + flow.net,
+    corrections,
+    leftToSpend,
+    onAccounts: isCurrent && input.carryFrom !== null ? leftToSpend - expectedIncome : null,
     isCurrent,
     isFuture: month > todayMonth,
     daysElapsed,
@@ -399,6 +418,32 @@ export function monthReport(input: ReportInput, month: string): MonthReport {
     previousSpent,
     mostFrequent,
   };
+}
+
+/** The month in three numbers: start + cameIn − wentOut = leftToSpend. */
+export function moneySummary(r: MonthReport): { start: number; cameIn: number; wentOut: number } {
+  const c = r.corrections;
+  const start = (r.carriedIn ?? 0) + c.start + c.accounts;
+  const cameIn = r.income + r.expectedIncome + Math.max(0, -r.saved) + Math.max(0, c.toSettle) + Math.max(0, c.small);
+  // spent, put into savings, and money that's missing from the accounts
+  return { start, cameIn, wentOut: start + cameIn - r.leftToSpend };
+}
+
+/** The categories with the most spending, and how much the others add up to. */
+export function topCategories(categories: CategoryStat[], max: number): { top: CategoryStat[]; rest: { count: number; spent: number } } {
+  const spent = categories.filter((c) => c.spent > 0);
+  // "1 more" would take as much room as showing it
+  const top = spent.length <= max + 1 ? spent : spent.slice(0, max);
+  const others = spent.slice(top.length);
+  return { top, rest: { count: others.length, spent: others.reduce((s, c) => s + c.spent, 0) } };
+}
+
+/** Who spent more than the next one; `even` = practically the same. null = nobody to compare with. */
+export function topSpender(people: PersonStat[], total: number): { name: string; gap: number; even: boolean } | null {
+  const [top, second] = people.filter((p) => p.id !== null).sort((a, b) => b.spent - a.spent);
+  if (!top || !second || top.spent + second.spent <= 0) return null;
+  const gap = top.spent - second.spent;
+  return { name: top.name, gap, even: gap < Math.max(500, total * 0.02) };
 }
 
 export interface TrendPoint {
@@ -479,7 +524,7 @@ export function yearReport(input: ReportInput, year: number): YearReport {
   const income = sum(ofKind(txs, 'income'));
   const saved = sum(ofKind(txs, 'saving'));
   const withSpending = totals.filter((m) => m.spent > 0);
-  const variable = expenses.filter((t) => !t.recurring_id);
+  const variable = expenses.filter((t) => !t.recurring_id && !t.write_off);
 
   const monthsWon = new Map<string, number>();
   for (const month of months) {

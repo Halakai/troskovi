@@ -5,7 +5,7 @@ import { addMonths, currentMonth, formatMonth, formatMonthShort, monthOf, yearOf
 import { formatMoney, percent } from '../lib/money';
 import { navigate } from '../lib/router';
 import { CatIcon, Empty, Progress, TopBar } from '../components/ui';
-import { CategoryList } from './Overview';
+import { CategoryList } from '../components/report';
 
 interface Props {
   params: URLSearchParams;

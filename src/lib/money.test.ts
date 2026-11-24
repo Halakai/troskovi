@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { centsToInput, parseAmount } from './money';
+import { centsToInput, parseAmount, parseBalance } from './money';
 
 describe('parseAmount', () => {
   it.each([
@@ -21,6 +21,24 @@ describe('parseAmount', () => {
 
   it.each(['', 'abc', '0', '-5', '12.3.4', '1.23.456', '1,2,3.4.5', '1.234,567'])('rejects %j', (input) => {
     expect(parseAmount(input)).toBeNull();
+  });
+});
+
+describe('parseBalance', () => {
+  it.each([
+    ['812,40', 81240],
+    ['1.234,56', 123456],
+    ['0', 0],
+    ['0,00', 0],
+    ['-12,50', -1250],
+    ['−€ 300', -30000],
+    ['-0', 0],
+  ])('%s → %i cents', (input, cents) => {
+    expect(parseBalance(input)).toBe(cents);
+  });
+
+  it.each(['', '-', 'abc', '--5', '1,2,3.4.5', '0.000'])('rejects %j', (input) => {
+    expect(parseBalance(input)).toBeNull();
   });
 });
 

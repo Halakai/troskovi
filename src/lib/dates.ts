@@ -60,6 +60,12 @@ export function recurringDate(month: string, dayOfMonth: number): string {
   return `${month}-${pad(Math.min(dayOfMonth, daysInMonth(month)))}`;
 }
 
+/** "2026-10-02", 3 → "2026-10-05" */
+export function addDays(iso: string, n: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return toISODate(new Date(y, m - 1, d + n));
+}
+
 export function monthsOfYear(year: number): string[] {
   return Array.from({ length: 12 }, (_, i) => `${year}-${pad(i + 1)}`);
 }
@@ -82,6 +88,25 @@ export function formatMonthShort(month: string): string {
 /** "2026-10-01" → "Thu, 1 Oct" */
 export function formatDay(iso: string): string {
   return dayFmt.format(parseISODate(iso));
+}
+
+/** "2026-11-15", "2026-11-22" → "15 – 22 Nov"; "2026-11-29", "2026-12-06" → "29 Nov – 6 Dec" */
+export function formatRange(from: string, to: string): string {
+  const day = (iso: string) => String(Number(iso.slice(8, 10)));
+  const full = (iso: string) => `${day(iso)} ${formatMonthShort(monthOf(iso))}`;
+  if (from === to) return full(to);
+  return monthOf(from) === monthOf(to) ? `${day(from)} – ${full(to)}` : `${full(from)} – ${full(to)}`;
+}
+
+/** "2026-11-22" → "22 Nov" */
+export function formatDayShort(iso: string): string {
+  return formatRange(iso, iso);
+}
+
+/** The time of a timestamp on this device: "14:32" */
+export function formatTime(timestamp: string): string {
+  const d = new Date(timestamp);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /** "2026-10-01" → "Today" / "Yesterday" / "Thursday, 1 October" */

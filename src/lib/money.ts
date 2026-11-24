@@ -51,6 +51,16 @@ export function parseAmount(input: string): number | null {
   return cents > 0 ? cents : null;
 }
 
+/** A bank balance: like parseAmount, but zero and below are fine ("0", "-12,50"). */
+export function parseBalance(input: string): number | null {
+  const s = input.replace(/[\s€]/g, '').replace('−', '-');
+  const negative = s.startsWith('-');
+  const digits = negative ? s.slice(1) : s;
+  if (/^0+([.,]0{0,2})?$/.test(digits)) return 0;
+  const cents = parseAmount(digits);
+  return cents === null ? null : negative ? -cents : cents;
+}
+
 export function percent(part: number, total: number): number {
   return total > 0 ? Math.round((part / total) * 100) : 0;
 }

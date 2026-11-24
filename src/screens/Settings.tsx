@@ -6,7 +6,7 @@ import type { ThemePref } from '../lib/theme';
 import { navigate } from '../lib/router';
 import { BUILD_TIME } from '../lib/pwa';
 import { useToast } from '../components/Toast';
-import { addMonths, currentMonth, formatDMY, formatMonth, monthOf, monthStart, todayISO } from '../lib/dates';
+import { addMonths, currentMonth, formatDMY, formatMonth, monthOf, monthStart, todayISO, WEEKDAYS } from '../lib/dates';
 import { Avatar, ColorPicker, Field, Segmented, Sheet, Toggle, TopBar } from '../components/ui';
 import { IconDownload, IconRight } from '../components/Icons';
 
@@ -82,6 +82,17 @@ export function Settings({ theme, setTheme, onSignOut }: Props) {
               💶 Leftover money
               <span className="dim small block">
                 {carryFrom ? `Carried into the next month since ${formatMonth(monthOf(carryFrom))}` : 'Every month starts from zero'}
+              </span>
+            </span>
+            <IconRight />
+          </button>
+          <button className="menu-item" onClick={() => navigate('/checks')}>
+            <span>
+              🧾 Balance check
+              <span className="dim small block">
+                {data.settings.check_weekday === null
+                  ? 'Not asked for automatically'
+                  : `Every ${WEEKDAYS[data.settings.check_weekday]} from ${data.settings.check_time}`}
               </span>
             </span>
             <IconRight />

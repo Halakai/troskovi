@@ -1,10 +1,11 @@
-import { Fragment, useState } from 'react';
-import { useData } from '../data/DataProvider';
+import { Fragment, useRef, useState } from 'react';
+import { useBalance, useData } from '../data/DataProvider';
 import { errorMessage } from '../supabase';
-import type { Category, CategoryKind, Kind, SavingsAccount, Transaction, TransactionInput } from '../types';
-import { centsToInput, parseAmount } from '../lib/money';
-import { formatDay, ordinal, todayISO } from '../lib/dates';
-import { isMainIn } from '../lib/categories';
+import type { BalanceCheck, Category, CategoryKind, Kind, SavingsAccount, Transaction, TransactionInput } from '../types';
+import { effect, openPeriods, periodLabel, periodOf } from '../lib/balance';
+import { centsToInput, formatMoney, parseAmount } from '../lib/money';
+import { formatDay, formatDayShort, formatDMY, formatTime, ordinal, todayISO } from '../lib/dates';
+import { isMainIn, isUnaccounted } from '../lib/categories';
 import { noteSuggestions } from '../lib/search';
 import { navigate } from '../lib/router';
 import { useToast } from './Toast';
@@ -17,6 +18,22 @@ export interface NewEntryDefaults {
   /** savings: put money in or take it out */
   direction?: 'in' | 'out';
   accountId?: string;
+  amountCents?: number;
+  /** it was found missing in this balance check */
+  checkId?: string;
+  onAdded?: (input: TransactionInput) => void | Promise<void>;
+}
+
+/** How an entry relates to a balance check – i.e. whether it happened before it. */
+interface CheckLink {
+  check: BalanceCheck;
+  /** "15 – 22 Nov" */
+  label: string;
+  /**
+   * found: added from the check; tagged: was already counted there; match: exactly the amount that's
+   * missing there; same-day: dated on the day of the check, but entered after it
+   */
+  why: 'found' | 'tagged' | 'match' | 'same-day';
 }
 
 interface Props {
@@ -38,7 +55,8 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const canDelete = !isNew && (data.isAdmin || (tx.pending === true && tx.created_by === data.userId));
 
   const [kind, setKind] = useState<Kind>(tx?.kind ?? defaults.kind ?? 'expense');
-  const [amount, setAmount] = useState(tx ? centsToInput(Math.abs(tx.amount_cents)) : '');
+  const startAmount = tx ? Math.abs(tx.amount_cents) : defaults.amountCents;
+  const [amount, setAmount] = useState(startAmount ? centsToInput(startAmount) : '');
   const [direction, setDirection] = useState<Direction>(tx ? (tx.amount_cents < 0 ? 'out' : 'in') : (defaults.direction ?? 'in'));
   // each list remembers its own pick while switching between Expense and Income
   const [cats, setCats] = useState<Record<CategoryKind, string | null>>({
@@ -59,6 +77,9 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const [repeat, setRepeat] = useState(false);
   const [busy, setBusy] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
+  const { periods } = useBalance();
+  /** answer to "did it happen before the balance check?", for one particular check */
+  const [answer, setAnswer] = useState<{ key: string; before: boolean; oldDate?: string } | null>(null);
 
   const isSaving = kind === 'saving';
   const catKind: CategoryKind = kind === 'income' ? 'income' : 'expense';
@@ -70,7 +91,8 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   const pickableCats = data.categories.filter(
     (c) =>
       c.kind === catKind &&
-      (c.owner_id === null || c.owner_id === data.userId || c.id === txCategory?.id || c.id === txCategory?.parent_id),
+      (c.owner_id === null || c.owner_id === data.userId || c.id === txCategory?.id || c.id === txCategory?.parent_id) &&
+      (!isUnaccounted(c) || c.id === txCategory?.id),
   );
   const pickableAccounts = data.savingsAccounts.filter(
     (a) => (!a.archived && (a.owner_id === null || a.owner_id === data.userId)) || a.id === tx?.savings_account_id,
@@ -81,8 +103,45 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
 
   const amountError = showErrors && cents === null;
   const pickError = showErrors && (isSaving ? !accountId : !categoryId);
-  const dateError = showErrors && !date;
   const planned = Boolean(date) && date > todayISO();
+
+  const findLink = (): CheckLink | null => {
+    const given = isNew ? defaults.checkId : tx.balance_check_id;
+    if (given) {
+      const check = data.checks.find((c) => c.id === given);
+      const p = periodOf(periods, given);
+      return check && p ? { why: isNew ? 'found' : 'tagged', check, label: periodLabel(p) } : null;
+    }
+    if (!date || planned) return null;
+    if (isNew && cents !== null) {
+      const e = effect({ kind, amount_cents: isSaving && direction === 'out' ? -cents : cents });
+      const p = openPeriods(periods).find((o) => o.gap === e && date >= o.check.date);
+      if (p) return { why: 'match', check: p.check, label: periodLabel(p) };
+    }
+    const after = (c: BalanceCheck) => isNew || Date.parse(tx.created_at) > Date.parse(c.checked_at);
+    const check = data.checks
+      .filter((c) => !c.whole_day && c.date === date && after(c))
+      .sort((a, b) => Date.parse(b.checked_at) - Date.parse(a.checked_at))[0];
+    const p = check && periodOf(periods, check.id);
+    return p ? { why: 'same-day', check, label: periodLabel(p) } : null;
+  };
+  const link = findLink();
+  const linkKey = link ? `${link.why}:${link.check.id}` : '';
+  const beforeCheck = link !== null && (answer?.key === linkKey ? answer.before : link.why === 'found' || link.why === 'tagged');
+  /** exactly the missing amount: only the person adding it can tell whether that's it */
+  const unanswered = link?.why === 'match' && answer?.key !== linkKey;
+  const question = useRef<HTMLDivElement>(null);
+  /** found in the check, but dated after it – can't be both */
+  const tooLate = link?.why === 'found' && date > link.check.date;
+  const answerCheck = (before: boolean) => {
+    if (!link) return;
+    setAnswer({ key: linkKey, before, oldDate: date });
+    if (link.why !== 'match') return;
+    // it has to be dated on (or before) the check it was missing from
+    if (before) setDate(link.check.date);
+    else if (answer?.oldDate) setDate(answer.oldDate);
+  };
+  const dateError = showErrors && (!date || tooLate);
   // a saved entry dated in the future can be marked as done: it then moves to today and counts
   const canMarkDone = canEdit && !isNew && tx.date > todayISO();
   const done = isSaving
@@ -111,8 +170,13 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
   /** markDone: save it dated today (a planned entry that was paid / received) */
   async function save(markDone = false) {
     const when = markDone ? todayISO() : date;
-    if (cents === null || (isSaving ? !accountId : !categoryId) || !when) {
+    if (cents === null || (isSaving ? !accountId : !categoryId) || !when || tooLate) {
       setShowErrors(true);
+      return;
+    }
+    if (unanswered) {
+      setShowErrors(true);
+      question.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
       return;
     }
     const input: TransactionInput = {
@@ -124,6 +188,10 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
       date: when,
       note: note.trim() || null,
     };
+    const checkId = link ? (beforeCheck && when <= link.check.date ? link.check.id : null) : (tx?.balance_check_id ?? null);
+    if (isNew ? checkId : checkId !== tx.balance_check_id) input.balance_check_id = checkId;
+    // a write-off that gets a real category isn't one any more
+    if (tx?.write_off && (kind !== tx.kind || categoryId !== tx.category_id)) input.write_off = false;
     setBusy(true);
     try {
       if (isNew) {
@@ -135,6 +203,7 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
               ? `${category(categoryId, 'income')?.name} · ${personName(input.person_id)}`
               : category(categoryId)?.name);
         const result = await data.addTransaction(input, { repeatMonthly: repeat && canRepeat, recurringName });
+        await defaults.onAdded?.(input);
         if (result === 'queued') toast('No connection – saved on this phone, will upload automatically', 'info');
         else toast(isSaving ? (direction === 'in' ? 'Added to savings' : 'Taken from savings') : kind === 'income' ? 'Income added' : 'Expense added');
       } else {
@@ -250,7 +319,9 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
               label="Date"
               hint={
                 dateError ? (
-                  <span className="text-danger">Pick a date</span>
+                  <span className="text-danger">
+                    {tooLate ? `It was missing on ${formatDMY(link.check.date)}, so pick that day or an earlier one` : 'Pick a date'}
+                  </span>
                 ) : planned ? (
                   <span className="planned-hint">
                     <IconClock /> Planned – not counted until that day
@@ -293,7 +364,20 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
             </div>
           )}
 
-          {isNew && canRepeat && (
+          {link && (
+            <div ref={question}>
+              <CheckQuestion
+                link={link}
+                before={unanswered ? null : beforeCheck}
+                onAnswer={answerCheck}
+                writeOff={tx?.write_off ?? false}
+                amount={cents}
+                error={showErrors && unanswered}
+              />
+            </div>
+          )}
+
+          {isNew && canRepeat && link?.why !== 'found' && (
             <Toggle
               checked={repeat}
               onChange={setRepeat}
@@ -337,6 +421,64 @@ export function TxSheet({ tx, defaults = {}, onClose }: Props) {
         </div>
       </form>
     </Sheet>
+  );
+}
+
+/** Did it happen before the balance check? Only shown when that isn't clear from the date. */
+function CheckQuestion({
+  link,
+  before,
+  onAnswer,
+  writeOff,
+  amount,
+  error,
+}: {
+  link: CheckLink;
+  /** null = not answered yet */
+  before: boolean | null;
+  onAnswer: (before: boolean) => void;
+  writeOff: boolean;
+  amount: number | null;
+  error: boolean;
+}) {
+  if (writeOff) {
+    return (
+      <div className="card-tip notice">
+        🧾 Written off in the balance check {link.label}. Found out what it was? Just pick the right category.
+      </div>
+    );
+  }
+  if (link.why === 'found') {
+    return <div className="card-tip notice">🧾 Counts as what was missing in {link.label}</div>;
+  }
+  if (link.why === 'match') {
+    return (
+      <div className={`card-tip notice stack ${error ? 'notice-error' : ''}`}>
+        <span>
+          🧾 {amount !== null && <b>{formatMoney(amount)}</b>} is exactly what’s still to settle from {link.label}. Is this it?
+        </span>
+        <Segmented
+          value={before === null ? '' : before ? 'yes' : 'no'}
+          onChange={(v) => onAnswer(v === 'yes')}
+          options={[
+            { value: 'no', label: 'No, it’s new' },
+            { value: 'yes', label: 'Yes, that’s it' },
+          ]}
+        />
+      </div>
+    );
+  }
+  return (
+    <Toggle
+      checked={before === true}
+      onChange={onAnswer}
+      label="Happened before the balance check"
+      hint={
+        link.why === 'same-day'
+          ? `It was done that day at ${formatTime(link.check.checked_at)}`
+          : `Counted in ${link.label} (checked on ${formatDayShort(link.check.date)})`
+      }
+    />
   );
 }
 

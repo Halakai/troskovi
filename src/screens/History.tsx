@@ -5,7 +5,7 @@ import { formatDayHeading, formatMonth, monthOf, todayISO, yearOf } from '../lib
 import { formatMoney, parseAmount } from '../lib/money';
 import { navigate } from '../lib/router';
 import { categoryResolver, isPlanned } from '../lib/stats';
-import { withSubcategories } from '../lib/categories';
+import { isUnaccounted, withSubcategories } from '../lib/categories';
 import { normalizeText } from '../lib/search';
 import type { CategoryKind, Transaction } from '../types';
 import { CategoryOptions, Empty, MonthSwitcher, Sheet, TopBar, useLookups } from '../components/ui';
@@ -303,7 +303,9 @@ function MoveSheet({ ids, kind, onClose, onDone }: { ids: string[]; kind: Catego
   const { category } = useLookups();
   const [categoryId, setCategoryId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const pickable = data.categories.filter((c) => c.kind === kind && (c.owner_id === null || c.owner_id === data.userId));
+  const pickable = data.categories.filter(
+    (c) => c.kind === kind && (c.owner_id === null || c.owner_id === data.userId) && !isUnaccounted(c),
+  );
   const what = kind === 'income' ? (ids.length === 1 ? 'income' : 'incomes') : ids.length === 1 ? 'expense' : 'expenses';
 
   async function move() {
